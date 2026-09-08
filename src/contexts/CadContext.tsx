@@ -11,9 +11,16 @@ import {
   CADTool,
   CADViewMode,
   ParametricFeature,
-  SketchFeature
+  SketchFeature,
+  SketchProfile,
+  Constraint,
+  Dimension
 } from '../types/cad.ts';
 import { sampleCADDocument } from '../core/sampleCadModel.ts';
+import {
+  solveConstraints,
+  analyzeSketchState
+} from '../core/solver/ConstraintSolver.ts';
 
 // Deep clone utility for immutable undo/redo history snapshots
 function cloneDoc(doc: CADDocument): CADDocument {
@@ -33,6 +40,8 @@ export interface CadState {
   activeFeatureId: string | null;
   // Currently active sketch ID for 2D entity additions
   activeSketchId: string | null;
+  // Currently selected 2D entity IDs
+  selectedEntityIds: string[];
 
   // History stacks for Undo / Redo
   history: CADDocument[];
@@ -43,11 +52,15 @@ export interface CadState {
   setViewMode: (mode: CADViewMode) => void;
   setActiveFeatureId: (featureId: string | null) => void;
   setActiveSketchId: (sketchId: string | null) => void;
+  setSelectedEntityIds: (ids: string[]) => void;
   addEntity: (sketchId: string, entity: CADEntity2D) => void;
   updateEntity: (sketchId: string, entityId: string, partial: Partial<CADEntity2D>) => void;
   deleteEntity: (sketchId: string, entityId: string) => void;
+  addConstraint: (sketchId: string, constraint: Constraint) => void;
+  addDimension: (sketchId: string, dimension: Dimension) => void;
   updateFeature: (featureId: string, partial: Partial<ParametricFeature>) => void;
   toggleSuppressFeature: (featureId: string) => void;
+  setSketchProfiles: (sketchId: string, profiles: SketchProfile[]) => void;
   undo: () => void;
   redo: () => void;
   resetDocument: (newDoc?: CADDocument) => void;
@@ -59,12 +72,17 @@ export const useCadStore = create<CadState>((set, get) => ({
   currentTool: 'SELECT',
   activeFeatureId: sampleCADDocument.activeFeatureId || 'feat_sketch_1',
   activeSketchId: sampleCADDocument.activeSketchId || 'feat_sketch_1',
+  selectedEntityIds: [],
   history: [],
   future: [],
 
   setTool: (tool: CADTool) => {
     if (get().currentTool === tool) return;
     set({ currentTool: tool });
+  },
+
+  setSelectedEntityIds: (ids: string[]) => {
+    set({ selectedEntityIds: ids });
   },
 
   setViewMode: (mode: CADViewMode) => {
@@ -101,9 +119,12 @@ export const useCadStore = create<CadState>((set, get) => ({
     const updatedFeatureTree = document.featureTree.map((feature) => {
       if (feature.id === sketchId && feature.type === 'sketch') {
         const sketch = feature as SketchFeature;
+        const newEntities = [...sketch.entities, entity];
+        const analysis = analyzeSketchState(newEntities, sketch.constraints);
         return {
           ...sketch,
-          entities: [...sketch.entities, entity],
+          entities: analysis.entities,
+          solverState: analysis.status,
           status: 'clean' as const
         };
       }
@@ -159,12 +180,81 @@ export const useCadStore = create<CadState>((set, get) => ({
     const updatedFeatureTree = document.featureTree.map((feature) => {
       if (feature.id === sketchId && feature.type === 'sketch') {
         const sketch = feature as SketchFeature;
+        const remainingEntities = sketch.entities.filter((ent) => ent.id !== entityId);
+        const remainingConstraints = sketch.constraints.filter((c) => !c.entityIds.includes(entityId));
+        const remainingDimensions = sketch.dimensions.filter((d) => !d.entityIds.includes(entityId));
+        const analysis = analyzeSketchState(remainingEntities, remainingConstraints);
         return {
           ...sketch,
-          entities: sketch.entities.filter((ent) => ent.id !== entityId),
-          // Also strip related constraints and dimensions
-          constraints: sketch.constraints.filter((c) => !c.entityIds.includes(entityId)),
-          dimensions: sketch.dimensions.filter((d) => !d.entityIds.includes(entityId))
+          entities: analysis.entities,
+          constraints: remainingConstraints,
+          dimensions: remainingDimensions,
+          solverState: analysis.status
+        };
+      }
+      return feature;
+    });
+
+    set({
+      document: {
+        ...document,
+        featureTree: updatedFeatureTree
+      },
+      selectedEntityIds: get().selectedEntityIds.filter((id) => id !== entityId),
+      history: newHistory,
+      future: []
+    });
+  },
+
+  addConstraint: (sketchId: string, constraint: Constraint) => {
+    const { document, history } = get();
+
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const updatedFeatureTree = document.featureTree.map((feature) => {
+      if (feature.id === sketchId && feature.type === 'sketch') {
+        const sketch = feature as SketchFeature;
+        const updatedConstraints = [...sketch.constraints, constraint];
+
+        // 呼叫幾何約束求解器與自由度分析
+        const solved = solveConstraints(sketch.entities, updatedConstraints);
+        const analysis = analyzeSketchState(solved, updatedConstraints);
+
+        return {
+          ...sketch,
+          entities: analysis.entities,
+          constraints: updatedConstraints,
+          solverState: analysis.status,
+          status: 'clean' as const
+        };
+      }
+      return feature;
+    });
+
+    set({
+      document: {
+        ...document,
+        featureTree: updatedFeatureTree
+      },
+      history: newHistory,
+      future: []
+    });
+  },
+
+  addDimension: (sketchId: string, dimension: Dimension) => {
+    const { document, history } = get();
+
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const updatedFeatureTree = document.featureTree.map((feature) => {
+      if (feature.id === sketchId && feature.type === 'sketch') {
+        const sketch = feature as SketchFeature;
+        return {
+          ...sketch,
+          dimensions: [...sketch.dimensions, dimension],
+          status: 'clean' as const
         };
       }
       return feature;
@@ -232,6 +322,32 @@ export const useCadStore = create<CadState>((set, get) => ({
     });
   },
 
+  setSketchProfiles: (sketchId: string, profiles: SketchProfile[]) => {
+    const { document } = get();
+    let changed = false;
+
+    const updatedFeatureTree = document.featureTree.map((feature) => {
+      if (feature.id === sketchId && feature.type === 'sketch') {
+        const sketch = feature as SketchFeature;
+        changed = true;
+        return {
+          ...sketch,
+          profiles
+        };
+      }
+      return feature;
+    });
+
+    if (changed) {
+      set({
+        document: {
+          ...document,
+          featureTree: updatedFeatureTree
+        }
+      });
+    }
+  },
+
   undo: () => {
     const { history, document, future } = get();
     if (history.length === 0) return;
@@ -265,6 +381,7 @@ export const useCadStore = create<CadState>((set, get) => ({
   resetDocument: (newDoc?: CADDocument) => {
     set({
       document: newDoc ? cloneDoc(newDoc) : cloneDoc(sampleCADDocument),
+      selectedEntityIds: [],
       history: [],
       future: []
     });
@@ -280,6 +397,7 @@ export const useViewMode = () => useCadStore((s) => s.viewMode);
 export const useCurrentTool = () => useCadStore((s) => s.currentTool);
 export const useActiveFeatureId = () => useCadStore((s) => s.activeFeatureId);
 export const useActiveSketchId = () => useCadStore((s) => s.activeSketchId);
+export const useSelectedEntityIds = () => useCadStore((s) => s.selectedEntityIds);
 export const useFeatureTree = () => useCadStore((s) => s.document.featureTree);
 export const useHistoryStatus = () => {
   const canUndo = useCadStore((s) => s.history.length > 0);
@@ -314,9 +432,12 @@ export const useCadActions = () => {
     setViewMode: useCadStore.getState().setViewMode,
     setActiveFeatureId: useCadStore.getState().setActiveFeatureId,
     setActiveSketchId: useCadStore.getState().setActiveSketchId,
+    setSelectedEntityIds: useCadStore.getState().setSelectedEntityIds,
     addEntity: useCadStore.getState().addEntity,
     updateEntity: useCadStore.getState().updateEntity,
     deleteEntity: useCadStore.getState().deleteEntity,
+    addConstraint: useCadStore.getState().addConstraint,
+    addDimension: useCadStore.getState().addDimension,
     updateFeature: useCadStore.getState().updateFeature,
     toggleSuppressFeature: useCadStore.getState().toggleSuppressFeature,
     undo: useCadStore.getState().undo,

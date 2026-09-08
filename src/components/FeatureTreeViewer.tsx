@@ -176,6 +176,17 @@ export const FeatureTreeViewer: React.FC<FeatureTreeViewerProps> = ({
                         {sketchFeat.dimensions.length}
                       </span>
                     </div>
+                    <div>
+                      Profiles:{' '}
+                      <span className="text-amber-400 font-mono font-semibold">
+                        {sketchFeat.profiles?.length || 0}
+                      </span>
+                      {sketchFeat.profiles && sketchFeat.profiles.length > 0 && sketchFeat.profiles[0].area && (
+                        <span className="text-[10px] text-slate-500 ml-1">
+                          ({sketchFeat.profiles[0].area} mm²)
+                        </span>
+                      )}
+                    </div>
                   </>
                 )}
 

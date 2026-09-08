@@ -79,7 +79,10 @@ export type EntityState =
   | 'locked'
   | 'under_constrained'
   | 'fully_constrained'
-  | 'over_constrained';
+  | 'over_constrained'
+  | 'UnderDefined'
+  | 'FullyDefined'
+  | 'OverDefined';
 
 export type LineType = 'continuous' | 'dashed' | 'dotted' | 'centerline' | 'phantom';
 
@@ -172,6 +175,7 @@ export type ConstraintType =
   | 'horizontal'
   | 'vertical'
   | 'distance'
+  | 'length'
   | 'tangent'
   | 'parallel'
   | 'perpendicular'
@@ -213,6 +217,13 @@ export interface DistanceConstraint extends BaseConstraint {
   distance: number;
 }
 
+export interface LengthConstraint extends BaseConstraint {
+  type: 'length';
+  /** Target length value in sketch linear units (e.g. mm) */
+  length?: number;
+  distance?: number;
+}
+
 export interface TangentConstraint extends BaseConstraint {
   type: 'tangent';
 }
@@ -238,6 +249,7 @@ export type Constraint =
   | HorizontalConstraint
   | VerticalConstraint
   | DistanceConstraint
+  | LengthConstraint
   | TangentConstraint
   | ParallelConstraint
   | PerpendicularConstraint
@@ -325,6 +337,8 @@ export interface SketchProfile {
   contourEntityIds: EntityId[];
   isIsland?: boolean; // Interior void or cutout
   area?: number;
+  /** Sampled boundary vertices for visualization and 3D triangulation */
+  points?: Point2D[];
 }
 
 /**
