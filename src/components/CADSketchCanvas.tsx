@@ -1,11 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   CADEntity2D,
   Constraint,
   Dimension,
   EntityState,
   LineEntity,
-  CircleEntity
+  CircleEntity,
+  Point2D
 } from '../types/cad.ts';
 import {
   useCadStore,
@@ -21,7 +22,9 @@ import {
   CheckCircle2,
   Sparkles,
   Trash2,
-  Crosshair
+  Crosshair,
+  Move,
+  RotateCcw
 } from 'lucide-react';
 
 interface CADSketchCanvasProps {
@@ -52,31 +55,213 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   const [hoveredEntityId, setHoveredEntityId] = useState<string | null>(null);
   const [showConstraints, setShowConstraints] = useState(true);
   const [showDimensions, setShowDimensions] = useState(true);
-  const [scale, setScale] = useState(2.6);
-  const [pan] = useState({ x: 90, y: 70 });
 
-  // Map CAD model space (mm) to SVG canvas coordinates
+  // SVG container reference for exact bounding client rect and DOM wheel event handling
+  const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  // Internal Pan & Scale states
+  // Default CAD view: Pan origin around (120, 100) in SVG screen pixels, scale = 2.6
+  const [scale, setScale] = useState<number>(2.6);
+  const [pan, setPan] = useState<Point2D>({ x: 120, y: 100 });
+
+  // Mouse pan interaction tracking
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef<{ mouseX: number; mouseY: number; panX: number; panY: number } | null>(null);
+
+  // Mouse cursor world coordinate indicator
+  const [cursorWorld, setCursorWorld] = useState<Point2D | null>(null);
+
+  /**
+   * --------------------------------------------------------------------------
+   * Coordinate Transformation Matrix / Functions
+   * --------------------------------------------------------------------------
+   * CAD World Coordinates:
+   *   X goes RIGHT (+X)
+   *   Y goes UP (+Y) (standard Cartesian / CAD convention)
+   *
+   * SVG Screen Coordinates:
+   *   svgX goes RIGHT (+svgX)
+   *   svgY goes DOWN (+svgY)
+   *
+   * Transformation equations:
+   *   svgX = pan.x + worldX * scale
+   *   svgY = pan.y - worldY * scale
+   *
+   * Inverse transformation (Screen to World):
+   *   worldX = (svgX - pan.x) / scale
+   *   worldY = (pan.y - svgY) / scale
+   * --------------------------------------------------------------------------
+   */
+  const worldToScreen = useCallback(
+    (world: Point2D): Point2D => ({
+      x: pan.x + world.x * scale,
+      y: pan.y - world.y * scale
+    }),
+    [pan.x, pan.y, scale]
+  );
+
+  const screenToWorld = useCallback(
+    (screen: Point2D): Point2D => ({
+      x: (screen.x - pan.x) / scale,
+      y: (pan.y - screen.y) / scale
+    }),
+    [pan.x, pan.y, scale]
+  );
+
+  // Direct scalar helper functions for SVG template strings
   const toSvgX = (x: number) => pan.x + x * scale;
-  const toSvgY = (y: number) => 380 - (pan.y + y * scale); // CAD Y goes UP, SVG goes DOWN
+  const toSvgY = (y: number) => pan.y - y * scale;
 
-  // Map SVG coordinates back to CAD model space
-  const toCadX = (svgX: number) => Math.round((svgX - pan.x) / scale);
-  const toCadY = (svgY: number) => Math.round((380 - svgY - pan.y) / scale);
+  /**
+   * Convert client (DOM viewport) mouse coordinates to SVG internal viewBox coordinates (0..620, 0..400)
+   */
+  const clientToSvgPoint = useCallback((clientX: number, clientY: number): Point2D | null => {
+    if (!svgRef.current) return null;
+    const rect = svgRef.current.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return {
+      x: ((clientX - rect.left) / rect.width) * 620,
+      y: ((clientY - rect.top) / rect.height) * 400
+    };
+  }, []);
+
+  /**
+   * --------------------------------------------------------------------------
+   * Mouse Wheel Zoom Centered at Cursor Position:
+   *   Given mouse screen position (s_x, s_y):
+   *   worldPos = screenToWorld(s_x, s_y)
+   *   newScale = clamp(scale * zoomFactor, minScale, maxScale)
+   *   To keep worldPos stationary under the cursor:
+   *     s_x = newPan.x + worldPos.x * newScale => newPan.x = s_x - worldPos.x * newScale
+   *     s_y = newPan.y - worldPos.y * newScale => newPan.y = s_y + worldPos.y * newScale
+   * --------------------------------------------------------------------------
+   */
+  const zoomAtPoint = useCallback(
+    (screenPoint: Point2D, zoomFactor: number) => {
+      setScale((prevScale) => {
+        const nextScale = Math.min(Math.max(prevScale * zoomFactor, 0.4), 15);
+        if (Math.abs(nextScale - prevScale) < 0.0001) return prevScale;
+
+        // Calculate world coordinates with current scale and pan
+        const worldX = (screenPoint.x - pan.x) / prevScale;
+        const worldY = (pan.y - screenPoint.y) / prevScale;
+
+        // Compute new pan so worldX, worldY stay exactly at screenPoint
+        const newPanX = screenPoint.x - worldX * nextScale;
+        const newPanY = screenPoint.y + worldY * nextScale;
+
+        setPan({ x: newPanX, y: newPanY });
+        return nextScale;
+      });
+    },
+    [pan.x, pan.y]
+  );
+
+  // Wheel event listener with passive: false to prevent outer page scrolling
+  useEffect(() => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const pt = clientToSvgPoint(e.clientX, e.clientY);
+      if (!pt) return;
+
+      // Sensitive smooth zoom ratio based on wheel delta
+      const zoomFactor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      zoomAtPoint(pt, zoomFactor);
+    };
+
+    svgEl.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      svgEl.removeEventListener('wheel', handleWheel);
+    };
+  }, [clientToSvgPoint, zoomAtPoint]);
+
+  /**
+   * --------------------------------------------------------------------------
+   * Mouse Pan Dragging Handlers (Supports Middle Mouse Button OR PAN tool)
+   * --------------------------------------------------------------------------
+   */
+  const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    // Middle click (button === 1), or Left click when PAN tool is selected, or Space key pressed
+    const isMiddleClick = e.button === 1;
+    const isPanTool = e.button === 0 && currentTool === 'PAN';
+
+    if (isMiddleClick || isPanTool) {
+      e.preventDefault();
+      const pt = clientToSvgPoint(e.clientX, e.clientY);
+      if (!pt) return;
+
+      setIsPanning(true);
+      panStartRef.current = {
+        mouseX: pt.x,
+        mouseY: pt.y,
+        panX: pan.x,
+        panY: pan.y
+      };
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const pt = clientToSvgPoint(e.clientX, e.clientY);
+    if (!pt) return;
+
+    // Continuously capture and display world coordinate under cursor
+    const worldPt = screenToWorld(pt);
+    setCursorWorld(worldPt);
+
+    // Active panning update
+    if (isPanning && panStartRef.current) {
+      const deltaX = pt.x - panStartRef.current.mouseX;
+      const deltaY = pt.y - panStartRef.current.mouseY;
+      setPan({
+        x: panStartRef.current.panX + deltaX,
+        y: panStartRef.current.panY + deltaY
+      });
+    }
+  };
+
+  const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (isPanning) {
+      setIsPanning(false);
+      panStartRef.current = null;
+    }
+  };
+
+  const handleMouseLeave = () => {
+    setIsPanning(false);
+    panStartRef.current = null;
+    setCursorWorld(null);
+  };
+
+  // Reset View to CAD default center & zoom
+  const handleResetView = () => {
+    setScale(2.6);
+    setPan({ x: 120, y: 100 });
+  };
 
   const selectedEntity = entities.find((e) => e.id === selectedEntityId);
 
+  /**
+   * Left-click handling on canvas for tool drafting or selecting
+   */
   const handleCanvasClick = (e: React.MouseEvent<SVGSVGElement>) => {
-    // If user clicked directly on background (not an entity)
+    // Ignore clicks if middle button or if we were panning
+    if (e.button === 1 || currentTool === 'PAN') return;
+
+    // If user clicked directly on background
     if (e.target !== e.currentTarget && (e.target as HTMLElement).tagName !== 'rect') {
       return;
     }
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickSvgX = ((e.clientX - rect.left) / rect.width) * 620;
-    const clickSvgY = ((e.clientY - rect.top) / rect.height) * 400;
+    const pt = clientToSvgPoint(e.clientX, e.clientY);
+    if (!pt) return;
 
-    const cadX = toCadX(clickSvgX);
-    const cadY = toCadY(clickSvgY);
+    const world = screenToWorld(pt);
+    const cadX = Math.round(world.x);
+    const cadY = Math.round(world.y);
 
     if (currentTool === 'LINE') {
       const newLine: LineEntity = {
@@ -104,12 +289,17 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
       };
       addEntity(targetSketchId, newCircle);
       setSelectedEntityId(newCircle.id);
+    } else if (currentTool === 'SELECT') {
+      // Clear selection on background click
+      setSelectedEntityId(null);
     }
   };
 
-
   return (
-    <div className="flex flex-col h-full bg-slate-900 rounded-xl overflow-hidden border border-slate-800 text-slate-100 shadow-md">
+    <div
+      ref={containerRef}
+      className="flex flex-col h-full bg-slate-900 rounded-xl overflow-hidden border border-slate-800 text-slate-100 shadow-md"
+    >
       {/* Top CAD Canvas Toolbar */}
       <div className="px-4 py-2.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2 text-xs">
         <div className="flex items-center gap-3">
@@ -159,22 +349,37 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           >
             Dimensions ({dimensions.length})
           </button>
+
           <div className="h-4 w-px bg-slate-800 mx-1" />
+
+          {/* Zoom In button (centered at canvas middle) */}
           <button
             id="zoom-in-btn"
-            onClick={() => setScale((s) => Math.min(s + 0.3, 5))}
-            className="p-1.5 hover:bg-slate-800 rounded text-slate-300"
-            title="Zoom In"
+            onClick={() => zoomAtPoint({ x: 310, y: 200 }, 1.2)}
+            className="p-1.5 hover:bg-slate-800 rounded text-slate-300 transition-colors"
+            title="Zoom In (or Scroll Wheel Up)"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
+
+          {/* Zoom Out button (centered at canvas middle) */}
           <button
             id="zoom-out-btn"
-            onClick={() => setScale((s) => Math.max(s - 0.3, 1))}
-            className="p-1.5 hover:bg-slate-800 rounded text-slate-300"
-            title="Zoom Out"
+            onClick={() => zoomAtPoint({ x: 310, y: 200 }, 1 / 1.2)}
+            className="p-1.5 hover:bg-slate-800 rounded text-slate-300 transition-colors"
+            title="Zoom Out (or Scroll Wheel Down)"
           >
             <ZoomOut className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Reset Zoom & Pan button */}
+          <button
+            id="reset-view-btn"
+            onClick={handleResetView}
+            className="p-1.5 hover:bg-slate-800 rounded text-slate-300 transition-colors"
+            title="Reset Pan & Zoom (Fit to Screen)"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
@@ -182,21 +387,34 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
       {/* Main Graphics Viewport */}
       <div className="relative flex-1 bg-slate-950 min-h-[380px] overflow-hidden select-none">
         <svg
+          ref={svgRef}
           onClick={handleCanvasClick}
-          className="w-full h-full cursor-crosshair"
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
+          onContextMenu={(e) => e.preventDefault()}
+          className={`w-full h-full ${
+            isPanning
+              ? 'cursor-grabbing'
+              : currentTool === 'PAN'
+              ? 'cursor-grab'
+              : 'cursor-crosshair'
+          }`}
           viewBox="0 0 620 400"
           preserveAspectRatio="xMidYMid meet"
         >
-          {/* Subtle Grid Pattern */}
+          {/* Dynamic Grid Pattern aligned with Pan & Scale */}
           <defs>
             <pattern
               id="cad-grid"
-              width="25"
-              height="25"
+              width={25 * scale}
+              height={25 * scale}
               patternUnits="userSpaceOnUse"
+              patternTransform={`translate(${pan.x}, ${pan.y})`}
             >
               <path
-                d="M 25 0 L 0 0 0 25"
+                d={`M ${25 * scale} 0 L 0 0 0 ${25 * scale}`}
                 fill="none"
                 stroke="#1e293b"
                 strokeWidth="0.75"
@@ -205,8 +423,9 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           </defs>
           <rect width="100%" height="100%" fill="url(#cad-grid)" />
 
-          {/* Coordinate Origin Axes (AutoCAD UCS Icon) */}
+          {/* Coordinate Origin Axes (AutoCAD UCS Icon: Red X, Green Y, CAD Y goes UP) */}
           <g>
+            {/* World X Axis (Red) */}
             <line
               x1={toSvgX(0)}
               y1={toSvgY(0)}
@@ -229,6 +448,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
               X
             </text>
 
+            {/* World Y Axis (Green, points UP in CAD model space) */}
             <line
               x1={toSvgX(0)}
               y1={toSvgY(0)}
@@ -289,7 +509,10 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 <g
                   key={entity.id}
                   className="cursor-pointer"
-                  onClick={() => setSelectedEntityId(entity.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedEntityId(entity.id);
+                  }}
                   onMouseEnter={() => setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
@@ -342,7 +565,10 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 <g
                   key={entity.id}
                   className="cursor-pointer"
-                  onClick={() => setSelectedEntityId(entity.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedEntityId(entity.id);
+                  }}
                   onMouseEnter={() => setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
@@ -367,7 +593,10 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 <g
                   key={entity.id}
                   className="cursor-pointer"
-                  onClick={() => setSelectedEntityId(entity.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedEntityId(entity.id);
+                  }}
                   onMouseEnter={() => setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
@@ -398,7 +627,10 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 <g
                   key={entity.id}
                   className="cursor-pointer"
-                  onClick={() => setSelectedEntityId(entity.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedEntityId(entity.id);
+                  }}
                   onMouseEnter={() => setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
@@ -603,6 +835,36 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           )}
         </svg>
 
+        {/* Real-time World Coordinate Indicator (CAD Status Bar Overlay) */}
+        <div className="absolute bottom-3 right-3 bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg px-3 py-1.5 text-xs shadow-lg flex items-center gap-3 font-mono">
+          <div className="flex items-center gap-1 text-slate-400">
+            <Crosshair className="w-3.5 h-3.5 text-sky-400" />
+            <span>World:</span>
+          </div>
+          {cursorWorld ? (
+            <div className="flex items-center gap-2">
+              <span className="text-rose-400 font-semibold">
+                X: {cursorWorld.x.toFixed(1)} mm
+              </span>
+              <span className="text-slate-600">|</span>
+              <span className="text-emerald-400 font-semibold">
+                Y: {cursorWorld.y.toFixed(1)} mm
+              </span>
+            </div>
+          ) : (
+            <span className="text-slate-500 italic">Hover canvas</span>
+          )}
+          <div className="text-slate-600">|</div>
+          <div className="text-slate-300">
+            Zoom: <span className="text-amber-400 font-semibold">{Math.round((scale / 2.6) * 100)}%</span>
+          </div>
+          <div className="text-slate-600 hidden md:block">|</div>
+          <div className="text-slate-500 text-[10px] hidden md:flex items-center gap-1">
+            <Move className="w-3 h-3 text-slate-400" />
+            <span>Mid-click / Drag to Pan • Wheel to Zoom</span>
+          </div>
+        </div>
+
         {/* Selected Entity Float Inspector */}
         {selectedEntity && (
           <div className="absolute bottom-3 left-3 bg-slate-900/90 backdrop-blur border border-slate-700 rounded-lg p-3 text-xs shadow-xl max-w-xs animate-in fade-in">
@@ -655,3 +917,4 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     </div>
   );
 };
+
