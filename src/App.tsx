@@ -1,23 +1,25 @@
 /**
  * @license
  * CAD Architecture Workbench (AutoCAD 2D + SolidWorks 3D Parametric)
+ * Powered by Zustand Global Store for high-performance selective re-rendering.
  */
 
 import React, { useState } from 'react';
 import {
-  sampleCADDocument,
-  datumFrontPlane,
-  datumTopPlane,
-  customAngledPlane,
-  sketchFeature1
-} from './core/sampleCadModel.ts';
+  useCadStore,
+  useViewMode,
+  useCurrentTool,
+  useActiveFeatureId,
+  useActiveSketch
+} from './contexts/index.ts';
 import {
   CADSketchCanvas,
+  CADToolbar,
+  CAD3DViewport,
   FeatureTreeViewer,
   PlaneInspector,
   TypeReferenceViewer
 } from './components/index.ts';
-import { ParametricFeature } from './types/cad.ts';
 import {
   Layers,
   Box,
@@ -25,33 +27,35 @@ import {
   Code2,
   Cpu,
   Sparkles,
-  FileCode,
-  HardDrive
+  MousePointer,
+  Rotate3d
 } from 'lucide-react';
 
 export default function App() {
-  const [doc, setDoc] = useState(sampleCADDocument);
-  const [activeTab, setActiveTab] = useState<'sketch' | 'planes' | 'types'>('sketch');
-  const [selectedFeatureId, setSelectedFeatureId] = useState<string>('feat_sketch_1');
-  const [selectedPlaneId, setSelectedPlaneId] = useState<string>(datumFrontPlane.id);
+  // Fine-grained Zustand atomic selectors (only updates when specific slice changes)
+  const docTitle = useCadStore((s) => s.document.title);
+  const docUnits = useCadStore((s) => s.document.units);
+  const planesMap = useCadStore((s) => s.document.planes);
+  const featureTree = useCadStore((s) => s.document.featureTree);
+  const viewMode = useViewMode();
+  const currentTool = useCurrentTool();
+  const activeFeatureId = useActiveFeatureId();
+  const activeSketch = useActiveSketch();
 
-  const handleToggleSuppress = (featureId: string) => {
-    setDoc((prev) => ({
-      ...prev,
-      featureTree: prev.featureTree.map((feat) =>
-        feat.id === featureId
-          ? ({ ...feat, suppressed: !feat.suppressed } as ParametricFeature)
-          : feat
-      )
-    }));
-  };
+  // Stable actions from Zustand store
+  const setActiveFeatureId = useCadStore((s) => s.setActiveFeatureId);
+  const toggleSuppressFeature = useCadStore((s) => s.toggleSuppressFeature);
 
-  const planesList = [datumFrontPlane, datumTopPlane, customAngledPlane];
+  // Local navigation tab for non-document auxiliary panels
+  const [activeTab, setActiveTab] = useState<'cad' | 'planes' | 'types'>('cad');
+  const [selectedPlaneId, setSelectedPlaneId] = useState<string>('plane_datum_front');
+
+  const planesList = Object.values(planesMap);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none">
-      {/* Top Application Bar */}
-      <header className="h-14 border-b border-slate-800 bg-slate-950/80 backdrop-blur px-4 flex items-center justify-between z-10">
+      {/* Top Application Header Bar */}
+      <header className="h-14 border-b border-slate-800 bg-slate-950/90 backdrop-blur px-4 flex items-center justify-between z-10">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-sky-600 to-indigo-600 flex items-center justify-center shadow-sm">
             <Box className="w-4 h-4 text-white" />
@@ -64,30 +68,35 @@ export default function App() {
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-950 text-sky-400 border border-sky-800/80 font-mono">
                 AutoCAD 2D + SolidWorks 3D
               </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800/80 font-mono">
+                Zustand Store Active
+              </span>
             </div>
             <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2">
-              <span>{doc.title}</span>
+              <span className="text-slate-200 font-semibold">{docTitle}</span>
               <span className="text-slate-600">•</span>
-              <span>Unit: {doc.units}</span>
+              <span>Unit: {docUnits}</span>
               <span className="text-slate-600">•</span>
-              <span className="text-emerald-400">TypeScript 5.8+</span>
+              <span>Mode: <strong className="text-sky-300">{viewMode}</strong></span>
+              <span className="text-slate-600">•</span>
+              <span>Tool: <strong className="text-indigo-300">{currentTool}</strong></span>
             </div>
           </div>
         </div>
 
-        {/* View Mode Switcher */}
+        {/* View / Inspector Navigation Tabs */}
         <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 p-1 rounded-lg">
           <button
-            id="tab-sketch-btn"
-            onClick={() => setActiveTab('sketch')}
+            id="tab-cad-btn"
+            onClick={() => setActiveTab('cad')}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
-              activeTab === 'sketch'
+              activeTab === 'cad'
                 ? 'bg-sky-600 text-white shadow-sm'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            2D Sketch & Drafting
+            CAD Canvas ({viewMode})
           </button>
           <button
             id="tab-planes-btn"
@@ -119,36 +128,55 @@ export default function App() {
       {/* Main Content Layout */}
       <div className="flex-1 flex overflow-hidden p-3 gap-3">
         {/* Left Column: FeatureManager Tree (DAG) */}
-        <div className="w-80 flex-shrink-0 h-full">
+        <div className="w-80 flex-shrink-0 h-full flex flex-col gap-2">
           <FeatureTreeViewer
-            features={doc.featureTree}
-            selectedFeatureId={selectedFeatureId}
-            onSelectFeature={setSelectedFeatureId}
-            onToggleSuppress={handleToggleSuppress}
+            features={featureTree}
+            selectedFeatureId={activeFeatureId || ''}
+            onSelectFeature={setActiveFeatureId}
+            onToggleSuppress={toggleSuppressFeature}
           />
         </div>
 
         {/* Right Main Viewport Area */}
-        <div className="flex-1 h-full flex flex-col">
-          {activeTab === 'sketch' && (
-            <CADSketchCanvas
-              entities={sketchFeature1.entities}
-              constraints={sketchFeature1.constraints}
-              dimensions={sketchFeature1.dimensions}
-              planeName={sketchFeature1.plane.name}
-              solverState={sketchFeature1.solverState}
-            />
+        <div className="flex-1 h-full flex flex-col gap-2 min-w-0">
+          {activeTab === 'cad' && (
+            <>
+              {/* CAD Action & Tool Bar (Zustand-powered) */}
+              <CADToolbar />
+
+              {/* Viewport switching based on viewMode ('2D' vs '3D') */}
+              <div className="flex-1 min-h-0">
+                {viewMode === '2D' ? (
+                  <CADSketchCanvas
+                    entities={activeSketch?.entities || []}
+                    constraints={activeSketch?.constraints || []}
+                    dimensions={activeSketch?.dimensions || []}
+                    planeName={activeSketch?.plane.name || 'Front Plane'}
+                    solverState={activeSketch?.solverState || 'fully_constrained'}
+                    sketchId={activeSketch?.id}
+                  />
+                ) : (
+                  <CAD3DViewport />
+                )}
+              </div>
+            </>
           )}
 
           {activeTab === 'planes' && (
-            <PlaneInspector
-              planes={planesList}
-              selectedPlaneId={selectedPlaneId}
-              onSelectPlane={setSelectedPlaneId}
-            />
+            <div className="flex-1 min-h-0">
+              <PlaneInspector
+                planes={planesList}
+                selectedPlaneId={selectedPlaneId}
+                onSelectPlane={setSelectedPlaneId}
+              />
+            </div>
           )}
 
-          {activeTab === 'types' && <TypeReferenceViewer />}
+          {activeTab === 'types' && (
+            <div className="flex-1 min-h-0">
+              <TypeReferenceViewer />
+            </div>
+          )}
         </div>
       </div>
 
@@ -160,14 +188,19 @@ export default function App() {
             Wasm & Multi-Thread Worker Ready
           </span>
           <span className="text-slate-600">|</span>
-          <span>Active Feature: {selectedFeatureId}</span>
+          <span>Active Feature: <span className="text-slate-300">{activeFeatureId || 'None'}</span></span>
+          <span className="text-slate-600">|</span>
+          <span>Tool: <span className="text-indigo-400">{currentTool}</span></span>
         </div>
         <div className="flex items-center gap-3">
+          <span className="text-emerald-400 font-semibold">Zustand Reactive Architecture</span>
+          <span className="text-slate-600">•</span>
           <span>COOP / COEP Enabled</span>
           <span className="text-slate-600">•</span>
-          <span className="text-emerald-400">src/types/cad.ts</span>
+          <span className="text-slate-400">src/contexts/CadContext.tsx</span>
         </div>
       </footer>
     </div>
   );
 }
+

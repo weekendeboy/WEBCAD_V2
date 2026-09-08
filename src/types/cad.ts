@@ -428,3 +428,20 @@ export interface CADDocument {
   activeSketchId?: FeatureId;
   units: 'mm' | 'm' | 'inch' | 'ft';
 }
+
+// ============================================================================
+// 7. Workbench Tools & View Modes
+// ============================================================================
+
+export type CADViewMode = '2D' | '3D';
+
+export type CADTool =
+  | 'SELECT'
+  | 'LINE'
+  | 'CIRCLE'
+  | 'ARC'
+  | 'RECTANGLE'
+  | 'POLYLINE'
+  | 'DIMENSION'
+  | 'PAN';
+

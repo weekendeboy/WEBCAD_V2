@@ -3,8 +3,15 @@ import {
   CADEntity2D,
   Constraint,
   Dimension,
-  EntityState
+  EntityState,
+  LineEntity,
+  CircleEntity
 } from '../types/cad.ts';
+import {
+  useCadStore,
+  useCurrentTool,
+  useActiveSketchId
+} from '../contexts/CadContext.tsx';
 import {
   Maximize2,
   ZoomIn,
@@ -12,7 +19,9 @@ import {
   Layers,
   Info,
   CheckCircle2,
-  Sparkles
+  Sparkles,
+  Trash2,
+  Crosshair
 } from 'lucide-react';
 
 interface CADSketchCanvasProps {
@@ -21,6 +30,7 @@ interface CADSketchCanvasProps {
   dimensions: Dimension[];
   planeName: string;
   solverState: 'under_constrained' | 'fully_constrained' | 'over_constrained';
+  sketchId?: string;
 }
 
 export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
@@ -28,8 +38,16 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   constraints,
   dimensions,
   planeName,
-  solverState
+  solverState,
+  sketchId
 }) => {
+  const currentTool = useCurrentTool();
+  const activeSketchId = useActiveSketchId();
+  const targetSketchId = sketchId || activeSketchId || 'feat_sketch_1';
+
+  const addEntity = useCadStore((s) => s.addEntity);
+  const deleteEntity = useCadStore((s) => s.deleteEntity);
+
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [hoveredEntityId, setHoveredEntityId] = useState<string | null>(null);
   const [showConstraints, setShowConstraints] = useState(true);
@@ -41,7 +59,54 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   const toSvgX = (x: number) => pan.x + x * scale;
   const toSvgY = (y: number) => 380 - (pan.y + y * scale); // CAD Y goes UP, SVG goes DOWN
 
+  // Map SVG coordinates back to CAD model space
+  const toCadX = (svgX: number) => Math.round((svgX - pan.x) / scale);
+  const toCadY = (svgY: number) => Math.round((380 - svgY - pan.y) / scale);
+
   const selectedEntity = entities.find((e) => e.id === selectedEntityId);
+
+  const handleCanvasClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    // If user clicked directly on background (not an entity)
+    if (e.target !== e.currentTarget && (e.target as HTMLElement).tagName !== 'rect') {
+      return;
+    }
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickSvgX = ((e.clientX - rect.left) / rect.width) * 620;
+    const clickSvgY = ((e.clientY - rect.top) / rect.height) * 400;
+
+    const cadX = toCadX(clickSvgX);
+    const cadY = toCadY(clickSvgY);
+
+    if (currentTool === 'LINE') {
+      const newLine: LineEntity = {
+        id: `ent_line_${Date.now().toString().slice(-6)}`,
+        type: 'line',
+        layer: 'layer_outline',
+        color: '#38bdf8',
+        state: 'under_constrained',
+        isConstruction: false,
+        start: { x: cadX, y: cadY },
+        end: { x: cadX + 30, y: cadY + 20 }
+      };
+      addEntity(targetSketchId, newLine);
+      setSelectedEntityId(newLine.id);
+    } else if (currentTool === 'CIRCLE') {
+      const newCircle: CircleEntity = {
+        id: `ent_circle_${Date.now().toString().slice(-6)}`,
+        type: 'circle',
+        layer: 'layer_outline',
+        color: '#f59e0b',
+        state: 'under_constrained',
+        isConstruction: false,
+        center: { x: cadX, y: cadY },
+        radius: 15
+      };
+      addEntity(targetSketchId, newCircle);
+      setSelectedEntityId(newCircle.id);
+    }
+  };
+
 
   return (
     <div className="flex flex-col h-full bg-slate-900 rounded-xl overflow-hidden border border-slate-800 text-slate-100 shadow-md">
@@ -67,6 +132,11 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
+            <Crosshair className="w-3 h-3 text-sky-400" />
+            <span>Tool: <strong className="text-sky-300">{currentTool}</strong></span>
+          </div>
+
           <button
             id="toggle-constraints-btn"
             onClick={() => setShowConstraints(!showConstraints)}
@@ -112,6 +182,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
       {/* Main Graphics Viewport */}
       <div className="relative flex-1 bg-slate-950 min-h-[380px] overflow-hidden select-none">
         <svg
+          onClick={handleCanvasClick}
           className="w-full h-full cursor-crosshair"
           viewBox="0 0 620 400"
           preserveAspectRatio="xMidYMid meet"
@@ -563,6 +634,20 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                   style={{ backgroundColor: selectedEntity.color || '#3b82f6' }}
                 />
               </div>
+            </div>
+            <div className="mt-2.5 pt-2 border-t border-slate-800 flex justify-end">
+              <button
+                id="delete-selected-entity-btn"
+                onClick={() => {
+                  deleteEntity(targetSketchId, selectedEntity.id);
+                  setSelectedEntityId(null);
+                }}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-rose-950/80 text-rose-300 border border-rose-800 hover:bg-rose-900 transition-colors text-[10px]"
+                title="Delete this entity from sketch (with undo support)"
+              >
+                <Trash2 className="w-3 h-3" />
+                Delete Entity
+              </button>
             </div>
           </div>
         )}
