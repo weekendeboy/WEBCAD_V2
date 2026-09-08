@@ -3,7 +3,6 @@ import {
   CADEntity2D,
   Constraint,
   Dimension,
-  EntityState,
   LineEntity,
   CircleEntity,
   Point2D
@@ -14,17 +13,14 @@ import {
   useActiveSketchId
 } from '../contexts/CadContext.tsx';
 import {
-  Maximize2,
   ZoomIn,
   ZoomOut,
-  Layers,
-  Info,
-  CheckCircle2,
-  Sparkles,
   Trash2,
   Crosshair,
   Move,
-  RotateCcw
+  RotateCcw,
+  Sparkles,
+  AlertCircle
 } from 'lucide-react';
 
 interface CADSketchCanvasProps {
@@ -45,6 +41,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   sketchId
 }) => {
   const currentTool = useCurrentTool();
+  const setTool = useCadStore((s) => s.setTool);
   const activeSketchId = useActiveSketchId();
   const targetSketchId = sketchId || activeSketchId || 'feat_sketch_1';
 
@@ -56,12 +53,11 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   const [showConstraints, setShowConstraints] = useState(true);
   const [showDimensions, setShowDimensions] = useState(true);
 
-  // SVG container reference for exact bounding client rect and DOM wheel event handling
+  // SVG container and element reference
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // Internal Pan & Scale states
-  // Default CAD view: Pan origin around (120, 100) in SVG screen pixels, scale = 2.6
+  // Internal Pan & Scale states (CAD convention: Y goes UP, SVG goes DOWN)
   const [scale, setScale] = useState<number>(2.6);
   const [pan, setPan] = useState<Point2D>({ x: 120, y: 100 });
 
@@ -69,28 +65,30 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ mouseX: number; mouseY: number; panX: number; panY: number } | null>(null);
 
-  // Mouse cursor world coordinate indicator
+  /**
+   * ============================================================================
+   * 繪圖狀態機 (Drawing State Machine)
+   * ============================================================================
+   * isDrawing: 是否處於多步驟繪圖進行中 (例如已點選第一點)
+   * drawStartPt: 繪圖起點世界座標 (CAD World Point, mm)
+   * cursorWorld: 滑鼠游標當前捕捉到的即時世界座標 (CAD World Point, mm)
+   */
+  const [isDrawing, setIsDrawing] = useState<boolean>(false);
+  const [drawStartPt, setDrawStartPt] = useState<Point2D | null>(null);
   const [cursorWorld, setCursorWorld] = useState<Point2D | null>(null);
 
   /**
    * --------------------------------------------------------------------------
-   * Coordinate Transformation Matrix / Functions
+   * 座標轉換矩陣 / 函數 (Screen <-> World Transformation)
    * --------------------------------------------------------------------------
-   * CAD World Coordinates:
-   *   X goes RIGHT (+X)
-   *   Y goes UP (+Y) (standard Cartesian / CAD convention)
+   * CAD World: X 向右 (+X), Y 向上 (+Y)
+   * SVG Screen: svgX 向右 (+svgX), svgY 向下 (+svgY)
    *
-   * SVG Screen Coordinates:
-   *   svgX goes RIGHT (+svgX)
-   *   svgY goes DOWN (+svgY)
+   * svgX = pan.x + world.x * scale
+   * svgY = pan.y - world.y * scale
    *
-   * Transformation equations:
-   *   svgX = pan.x + worldX * scale
-   *   svgY = pan.y - worldY * scale
-   *
-   * Inverse transformation (Screen to World):
-   *   worldX = (svgX - pan.x) / scale
-   *   worldY = (pan.y - svgY) / scale
+   * world.x = (svgX - pan.x) / scale
+   * world.y = (pan.y - svgY) / scale
    * --------------------------------------------------------------------------
    */
   const worldToScreen = useCallback(
@@ -109,7 +107,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     [pan.x, pan.y, scale]
   );
 
-  // Direct scalar helper functions for SVG template strings
+  // Direct scalar helper functions for SVG coordinate mapping
   const toSvgX = (x: number) => pan.x + x * scale;
   const toSvgY = (y: number) => pan.y - y * scale;
 
@@ -128,13 +126,44 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
 
   /**
    * --------------------------------------------------------------------------
-   * Mouse Wheel Zoom Centered at Cursor Position:
-   *   Given mouse screen position (s_x, s_y):
-   *   worldPos = screenToWorld(s_x, s_y)
-   *   newScale = clamp(scale * zoomFactor, minScale, maxScale)
-   *   To keep worldPos stationary under the cursor:
-   *     s_x = newPan.x + worldPos.x * newScale => newPan.x = s_x - worldPos.x * newScale
-   *     s_y = newPan.y - worldPos.y * newScale => newPan.y = s_y + worldPos.y * newScale
+   * 取消防呆機制 (Cancel & Reset Safety Mechanism)
+   * --------------------------------------------------------------------------
+   * 按下 ESC 鍵即刻中斷繪圖狀態機、清空橡皮筋預覽，並若在繪圖工具下則切換回 SELECT 工具
+   */
+  const cancelDrawing = useCallback(() => {
+    setIsDrawing(false);
+    setDrawStartPt(null);
+  }, []);
+
+  // 監聽鍵盤 ESC 事件
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isDrawing) {
+          cancelDrawing();
+        } else if (currentTool !== 'SELECT') {
+          setTool('SELECT');
+          setSelectedEntityId(null);
+        } else {
+          setSelectedEntityId(null);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isDrawing, currentTool, cancelDrawing, setTool]);
+
+  // 當切換繪圖工具時，自動重置任何未完成的繪製動作
+  useEffect(() => {
+    cancelDrawing();
+  }, [currentTool, cancelDrawing]);
+
+  /**
+   * --------------------------------------------------------------------------
+   * 滑鼠滾輪縮放 (Zoom Centered at Cursor)
    * --------------------------------------------------------------------------
    */
   const zoomAtPoint = useCallback(
@@ -143,11 +172,11 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
         const nextScale = Math.min(Math.max(prevScale * zoomFactor, 0.4), 15);
         if (Math.abs(nextScale - prevScale) < 0.0001) return prevScale;
 
-        // Calculate world coordinates with current scale and pan
+        // 計算目前游標所在世界座標
         const worldX = (screenPoint.x - pan.x) / prevScale;
         const worldY = (pan.y - screenPoint.y) / prevScale;
 
-        // Compute new pan so worldX, worldY stay exactly at screenPoint
+        // 補償平移量，確保游標下方的世界點保持固定
         const newPanX = screenPoint.x - worldX * nextScale;
         const newPanY = screenPoint.y + worldY * nextScale;
 
@@ -158,7 +187,6 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     [pan.x, pan.y]
   );
 
-  // Wheel event listener with passive: false to prevent outer page scrolling
   useEffect(() => {
     const svgEl = svgRef.current;
     if (!svgEl) return;
@@ -168,7 +196,6 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
       const pt = clientToSvgPoint(e.clientX, e.clientY);
       if (!pt) return;
 
-      // Sensitive smooth zoom ratio based on wheel delta
       const zoomFactor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
       zoomAtPoint(pt, zoomFactor);
     };
@@ -181,11 +208,10 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
 
   /**
    * --------------------------------------------------------------------------
-   * Mouse Pan Dragging Handlers (Supports Middle Mouse Button OR PAN tool)
+   * 滑鼠中鍵平移 (Pan) 拖曳處理
    * --------------------------------------------------------------------------
    */
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
-    // Middle click (button === 1), or Left click when PAN tool is selected, or Space key pressed
     const isMiddleClick = e.button === 1;
     const isPanTool = e.button === 0 && currentTool === 'PAN';
 
@@ -204,15 +230,21 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     }
   };
 
+  /**
+   * --------------------------------------------------------------------------
+   * 滑鼠移動事件 (Mouse Move Handler)
+   * 即時更新 cursorWorld，支援橡皮筋預覽與平移更新
+   * --------------------------------------------------------------------------
+   */
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const pt = clientToSvgPoint(e.clientX, e.clientY);
     if (!pt) return;
 
-    // Continuously capture and display world coordinate under cursor
+    // 即時轉換為世界座標 (保留 1 位小數精度)
     const worldPt = screenToWorld(pt);
     setCursorWorld(worldPt);
 
-    // Active panning update
+    // 處理中鍵平移
     if (isPanning && panStartRef.current) {
       const deltaX = pt.x - panStartRef.current.mouseX;
       const deltaY = pt.y - panStartRef.current.mouseY;
@@ -236,71 +268,120 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     setCursorWorld(null);
   };
 
-  // Reset View to CAD default center & zoom
   const handleResetView = () => {
     setScale(2.6);
     setPan({ x: 120, y: 100 });
   };
 
-  const selectedEntity = entities.find((e) => e.id === selectedEntityId);
-
   /**
-   * Left-click handling on canvas for tool drafting or selecting
+   * --------------------------------------------------------------------------
+   * 畫布點擊事件：繪圖狀態機轉移與狀態安全提交
+   * --------------------------------------------------------------------------
+   * 多步驟繪圖邏輯：
+   * - 步驟 1 (未在繪圖狀態)：點擊第一下記錄 drawStartPt，進入 isDrawing = true
+   * - 步驟 2 (處於 isDrawing 狀態)：點擊第二下計算最終尺寸，呼叫 addEntity 寫入全域狀態，
+   *   並徹底重置 isDrawing 與 drawStartPt，避免產生無效圖元或幽靈狀態。
    */
   const handleCanvasClick = (e: React.MouseEvent<SVGSVGElement>) => {
-    // Ignore clicks if middle button or if we were panning
+    // 忽略中鍵點擊與平移工具模式
     if (e.button === 1 || currentTool === 'PAN') return;
-
-    // If user clicked directly on background
-    if (e.target !== e.currentTarget && (e.target as HTMLElement).tagName !== 'rect') {
-      return;
-    }
 
     const pt = clientToSvgPoint(e.clientX, e.clientY);
     if (!pt) return;
 
     const world = screenToWorld(pt);
-    const cadX = Math.round(world.x);
-    const cadY = Math.round(world.y);
+    const clickPt: Point2D = {
+      x: Math.round(world.x * 10) / 10,
+      y: Math.round(world.y * 10) / 10
+    };
 
+    // 工具邏輯
     if (currentTool === 'LINE') {
-      const newLine: LineEntity = {
-        id: `ent_line_${Date.now().toString().slice(-6)}`,
-        type: 'line',
-        layer: 'layer_outline',
-        color: '#38bdf8',
-        state: 'under_constrained',
-        isConstruction: false,
-        start: { x: cadX, y: cadY },
-        end: { x: cadX + 30, y: cadY + 20 }
-      };
-      addEntity(targetSketchId, newLine);
-      setSelectedEntityId(newLine.id);
+      if (!isDrawing || !drawStartPt) {
+        // 第一下點擊：設定線段起點
+        setDrawStartPt(clickPt);
+        setIsDrawing(true);
+      } else {
+        // 第二下點擊：完成線段幾何定義
+        const dx = clickPt.x - drawStartPt.x;
+        const dy = clickPt.y - drawStartPt.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        // 防呆：兩點距離過小則視為誤觸，不予提交
+        if (dist > 0.5) {
+          const newLine: LineEntity = {
+            id: `ent_line_${Date.now().toString().slice(-6)}`,
+            type: 'line',
+            layer: 'layer_outline',
+            color: '#38bdf8',
+            state: 'under_constrained',
+            isConstruction: false,
+            start: { ...drawStartPt },
+            end: { ...clickPt }
+          };
+          addEntity(targetSketchId, newLine);
+          setSelectedEntityId(newLine.id);
+        }
+
+        // 徹底重置狀態機
+        setIsDrawing(false);
+        setDrawStartPt(null);
+      }
     } else if (currentTool === 'CIRCLE') {
-      const newCircle: CircleEntity = {
-        id: `ent_circle_${Date.now().toString().slice(-6)}`,
-        type: 'circle',
-        layer: 'layer_outline',
-        color: '#f59e0b',
-        state: 'under_constrained',
-        isConstruction: false,
-        center: { x: cadX, y: cadY },
-        radius: 15
-      };
-      addEntity(targetSketchId, newCircle);
-      setSelectedEntityId(newCircle.id);
+      if (!isDrawing || !drawStartPt) {
+        // 第一下點擊：設定圓心
+        setDrawStartPt(clickPt);
+        setIsDrawing(true);
+      } else {
+        // 第二下點擊：依據與圓心的距離確定半徑
+        const dx = clickPt.x - drawStartPt.x;
+        const dy = clickPt.y - drawStartPt.y;
+        const radius = Math.round(Math.sqrt(dx * dx + dy * dy) * 10) / 10;
+
+        // 防呆：半徑需大於最小閾值
+        if (radius > 1) {
+          const newCircle: CircleEntity = {
+            id: `ent_circle_${Date.now().toString().slice(-6)}`,
+            type: 'circle',
+            layer: 'layer_outline',
+            color: '#f59e0b',
+            state: 'under_constrained',
+            isConstruction: false,
+            center: { ...drawStartPt },
+            radius
+          };
+          addEntity(targetSketchId, newCircle);
+          setSelectedEntityId(newCircle.id);
+        }
+
+        // 徹底重置狀態機
+        setIsDrawing(false);
+        setDrawStartPt(null);
+      }
     } else if (currentTool === 'SELECT') {
-      // Clear selection on background click
-      setSelectedEntityId(null);
+      // 若點擊背景則取消當前選取
+      if (e.target === e.currentTarget || (e.target as HTMLElement).tagName === 'rect') {
+        setSelectedEntityId(null);
+      }
     }
   };
+
+  const selectedEntity = entities.find((e) => e.id === selectedEntityId);
+
+  // 計算橡皮筋即時統計數據 (供動態徽章與提示使用)
+  let rubberBandDist = 0;
+  if (isDrawing && drawStartPt && cursorWorld) {
+    const dx = cursorWorld.x - drawStartPt.x;
+    const dy = cursorWorld.y - drawStartPt.y;
+    rubberBandDist = Math.sqrt(dx * dx + dy * dy);
+  }
 
   return (
     <div
       ref={containerRef}
       className="flex flex-col h-full bg-slate-900 rounded-xl overflow-hidden border border-slate-800 text-slate-100 shadow-md"
     >
-      {/* Top CAD Canvas Toolbar */}
+      {/* 頂部 CAD 狀態列 */}
       <div className="px-4 py-2.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2 text-xs">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 font-mono text-slate-300">
@@ -319,12 +400,27 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 : '⚠ Under Constrained'}
             </span>
           </div>
+
+          {/* 繪圖狀態中提示徽章 */}
+          {isDrawing && (
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-950/80 border border-amber-700/70 text-amber-300 text-[11px] animate-pulse">
+              <Sparkles className="w-3 h-3 text-amber-400" />
+              <span>
+                {currentTool === 'LINE' ? 'Drawing Line (Click endpoint)' : 'Drawing Circle (Click radius)'}
+              </span>
+              <span className="text-[10px] text-amber-400/70 ml-1 font-mono">
+                [ESC to Cancel]
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
           <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
             <Crosshair className="w-3 h-3 text-sky-400" />
-            <span>Tool: <strong className="text-sky-300">{currentTool}</strong></span>
+            <span>
+              Tool: <strong className="text-sky-300">{currentTool}</strong>
+            </span>
           </div>
 
           <button
@@ -352,27 +448,27 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
 
           <div className="h-4 w-px bg-slate-800 mx-1" />
 
-          {/* Zoom In button (centered at canvas middle) */}
+          {/* Zoom In button */}
           <button
             id="zoom-in-btn"
             onClick={() => zoomAtPoint({ x: 310, y: 200 }, 1.2)}
             className="p-1.5 hover:bg-slate-800 rounded text-slate-300 transition-colors"
-            title="Zoom In (or Scroll Wheel Up)"
+            title="Zoom In (Scroll Up)"
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
 
-          {/* Zoom Out button (centered at canvas middle) */}
+          {/* Zoom Out button */}
           <button
             id="zoom-out-btn"
             onClick={() => zoomAtPoint({ x: 310, y: 200 }, 1 / 1.2)}
             className="p-1.5 hover:bg-slate-800 rounded text-slate-300 transition-colors"
-            title="Zoom Out (or Scroll Wheel Down)"
+            title="Zoom Out (Scroll Down)"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
 
-          {/* Reset Zoom & Pan button */}
+          {/* Reset Zoom & Pan */}
           <button
             id="reset-view-btn"
             onClick={handleResetView}
@@ -384,7 +480,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
         </div>
       </div>
 
-      {/* Main Graphics Viewport */}
+      {/* 主繪圖視埠 */}
       <div className="relative flex-1 bg-slate-950 min-h-[380px] overflow-hidden select-none">
         <svg
           ref={svgRef}
@@ -399,12 +495,14 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
               ? 'cursor-grabbing'
               : currentTool === 'PAN'
               ? 'cursor-grab'
+              : isDrawing
+              ? 'cursor-crosshair'
               : 'cursor-crosshair'
           }`}
           viewBox="0 0 620 400"
           preserveAspectRatio="xMidYMid meet"
         >
-          {/* Dynamic Grid Pattern aligned with Pan & Scale */}
+          {/* 動態網格 (Aligned with Pan & Scale) */}
           <defs>
             <pattern
               id="cad-grid"
@@ -423,9 +521,8 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           </defs>
           <rect width="100%" height="100%" fill="url(#cad-grid)" />
 
-          {/* Coordinate Origin Axes (AutoCAD UCS Icon: Red X, Green Y, CAD Y goes UP) */}
+          {/* 座標原點 UCS 軸 (Red X, Green Y, CAD Y points UP) */}
           <g>
-            {/* World X Axis (Red) */}
             <line
               x1={toSvgX(0)}
               y1={toSvgY(0)}
@@ -448,7 +545,6 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
               X
             </text>
 
-            {/* World Y Axis (Green, points UP in CAD model space) */}
             <line
               x1={toSvgX(0)}
               y1={toSvgY(0)}
@@ -490,7 +586,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
             </text>
           </g>
 
-          {/* Render 2D Geometry Entities */}
+          {/* 渲染已有幾何圖元 (Render 2D Geometry Entities) */}
           {entities.map((entity) => {
             const isSelected = entity.id === selectedEntityId;
             const isHovered = entity.id === hoveredEntityId;
@@ -510,10 +606,13 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                   key={entity.id}
                   className="cursor-pointer"
                   onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedEntityId(entity.id);
+                    // 若當前正在畫線，則不截斷點擊，讓外層 canvas 接收第二點
+                    if (!isDrawing) {
+                      e.stopPropagation();
+                      setSelectedEntityId(entity.id);
+                    }
                   }}
-                  onMouseEnter={() => setHoveredEntityId(entity.id)}
+                  onMouseEnter={() => !isDrawing && setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
                   <line
@@ -525,7 +624,6 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                     strokeWidth={strokeWidth}
                     strokeDasharray={strokeDasharray}
                   />
-                  {/* Endpoint Vertex Handles */}
                   <circle
                     cx={toSvgX(entity.start.x)}
                     cy={toSvgY(entity.start.y)}
@@ -558,7 +656,6 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
               const pEndY = toSvgY(endY);
               const rScaled = entity.radius * scale;
 
-              // Counter-clockwise in CAD translates to standard SVG sweep
               const pathD = `M ${pStartX} ${pStartY} A ${rScaled} ${rScaled} 0 0 0 ${pEndX} ${pEndY}`;
 
               return (
@@ -566,10 +663,12 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                   key={entity.id}
                   className="cursor-pointer"
                   onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedEntityId(entity.id);
+                    if (!isDrawing) {
+                      e.stopPropagation();
+                      setSelectedEntityId(entity.id);
+                    }
                   }}
-                  onMouseEnter={() => setHoveredEntityId(entity.id)}
+                  onMouseEnter={() => !isDrawing && setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
                   <path
@@ -594,10 +693,12 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                   key={entity.id}
                   className="cursor-pointer"
                   onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedEntityId(entity.id);
+                    if (!isDrawing) {
+                      e.stopPropagation();
+                      setSelectedEntityId(entity.id);
+                    }
                   }}
-                  onMouseEnter={() => setHoveredEntityId(entity.id)}
+                  onMouseEnter={() => !isDrawing && setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
                   <circle
@@ -628,10 +729,12 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                   key={entity.id}
                   className="cursor-pointer"
                   onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedEntityId(entity.id);
+                    if (!isDrawing) {
+                      e.stopPropagation();
+                      setSelectedEntityId(entity.id);
+                    }
                   }}
-                  onMouseEnter={() => setHoveredEntityId(entity.id)}
+                  onMouseEnter={() => !isDrawing && setHoveredEntityId(entity.id)}
                   onMouseLeave={() => setHoveredEntityId(null)}
                 >
                   <polyline
@@ -657,14 +760,154 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
             return null;
           })}
 
-          {/* Render Dimensions */}
+          {/* ====================================================================
+              橡皮筋動態預覽 (Rubber-Banding Preview Layer)
+              ==================================================================== */}
+          {isDrawing && drawStartPt && cursorWorld && (
+            <g id="rubber-band-preview-group" pointerEvents="none">
+              {/* LINE 工具橡皮筋預覽 */}
+              {currentTool === 'LINE' && (
+                <>
+                  {/* 動態虛線 (琥珀色 #f59e0b) */}
+                  <line
+                    x1={toSvgX(drawStartPt.x)}
+                    y1={toSvgY(drawStartPt.y)}
+                    x2={toSvgX(cursorWorld.x)}
+                    y2={toSvgY(cursorWorld.y)}
+                    stroke="#f59e0b"
+                    strokeWidth="2"
+                    strokeDasharray="5,5"
+                  />
+                  {/* 起點錨點 */}
+                  <circle
+                    cx={toSvgX(drawStartPt.x)}
+                    cy={toSvgY(drawStartPt.y)}
+                    r="4"
+                    fill="#f59e0b"
+                    stroke="#1e293b"
+                    strokeWidth="1.5"
+                  />
+                  {/* 游標目前終點錨點 */}
+                  <circle
+                    cx={toSvgX(cursorWorld.x)}
+                    cy={toSvgY(cursorWorld.y)}
+                    r="3.5"
+                    fill="#fbbf24"
+                  />
+                  {/* 即時長度與角度標籤 */}
+                  <g
+                    transform={`translate(${
+                      (toSvgX(drawStartPt.x) + toSvgX(cursorWorld.x)) / 2
+                    }, ${
+                      (toSvgY(drawStartPt.y) + toSvgY(cursorWorld.y)) / 2 - 12
+                    })`}
+                  >
+                    <rect
+                      x="-30"
+                      y="-9"
+                      width="60"
+                      height="16"
+                      rx="3"
+                      fill="#451a03"
+                      stroke="#d97706"
+                      strokeWidth="1"
+                    />
+                    <text
+                      x="0"
+                      y="3"
+                      textAnchor="middle"
+                      fill="#fef08a"
+                      fontSize="9"
+                      fontFamily="monospace"
+                      fontWeight="bold"
+                    >
+                      {rubberBandDist.toFixed(1)} mm
+                    </text>
+                  </g>
+                </>
+              )}
+
+              {/* CIRCLE 工具橡皮筋預覽 */}
+              {currentTool === 'CIRCLE' && (
+                <>
+                  {/* 動態圓形虛線 (琥珀色 #f59e0b) */}
+                  <circle
+                    cx={toSvgX(drawStartPt.x)}
+                    cy={toSvgY(drawStartPt.y)}
+                    r={Math.max(rubberBandDist * scale, 1)}
+                    fill="rgba(245, 158, 11, 0.08)"
+                    stroke="#f59e0b"
+                    strokeWidth="2"
+                    strokeDasharray="5,5"
+                  />
+                  {/* 半徑導引虛線 */}
+                  <line
+                    x1={toSvgX(drawStartPt.x)}
+                    y1={toSvgY(drawStartPt.y)}
+                    x2={toSvgX(cursorWorld.x)}
+                    y2={toSvgY(cursorWorld.y)}
+                    stroke="#d97706"
+                    strokeWidth="1"
+                    strokeDasharray="2,2"
+                  />
+                  {/* 圓心錨點 */}
+                  <circle
+                    cx={toSvgX(drawStartPt.x)}
+                    cy={toSvgY(drawStartPt.y)}
+                    r="4"
+                    fill="#ef4444"
+                    stroke="#1e293b"
+                    strokeWidth="1.5"
+                  />
+                  {/* 圓周邊界指示點 */}
+                  <circle
+                    cx={toSvgX(cursorWorld.x)}
+                    cy={toSvgY(cursorWorld.y)}
+                    r="3.5"
+                    fill="#f59e0b"
+                  />
+                  {/* 半徑標籤 */}
+                  <g
+                    transform={`translate(${
+                      (toSvgX(drawStartPt.x) + toSvgX(cursorWorld.x)) / 2
+                    }, ${
+                      (toSvgY(drawStartPt.y) + toSvgY(cursorWorld.y)) / 2 - 12
+                    })`}
+                  >
+                    <rect
+                      x="-28"
+                      y="-9"
+                      width="56"
+                      height="16"
+                      rx="3"
+                      fill="#451a03"
+                      stroke="#d97706"
+                      strokeWidth="1"
+                    />
+                    <text
+                      x="0"
+                      y="3"
+                      textAnchor="middle"
+                      fill="#fef08a"
+                      fontSize="9"
+                      fontFamily="monospace"
+                      fontWeight="bold"
+                    >
+                      R {rubberBandDist.toFixed(1)}
+                    </text>
+                  </g>
+                </>
+              )}
+            </g>
+          )}
+
+          {/* 渲染標註尺寸 (Dimensions) */}
           {showDimensions &&
             dimensions.map((dim) => {
               const tx = toSvgX(dim.textPosition.x);
               const ty = toSvgY(dim.textPosition.y);
               return (
                 <g key={dim.id} className="text-[10px] font-mono select-none">
-                  {/* Dimension marker leader lines */}
                   {dim.type === 'linear_horizontal' && (
                     <g stroke="#10b981" strokeWidth="1" strokeDasharray="2,2">
                       <line
@@ -737,10 +980,10 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
               );
             })}
 
-          {/* Render Geometric Constraint Badges (SolidWorks Style) */}
+          {/* 渲染幾何約束標記 (Geometric Constraints) */}
           {showConstraints && (
             <g>
-              {/* Bottom Horizontal */}
+              {/* Horizontal */}
               <g transform={`translate(${toSvgX(50)}, ${toSvgY(0) + 12})`}>
                 <rect
                   x="-8"
@@ -764,7 +1007,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 </text>
               </g>
 
-              {/* Left Vertical */}
+              {/* Vertical */}
               <g transform={`translate(${toSvgX(0) - 14}, ${toSvgY(40)})`}>
                 <rect
                   x="-7"
@@ -788,7 +1031,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
                 </text>
               </g>
 
-              {/* Arc Tangent */}
+              {/* Tangent */}
               <g transform={`translate(${toSvgX(80)}, ${toSvgY(80) - 12})`}>
                 <circle
                   r="7"
@@ -835,7 +1078,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           )}
         </svg>
 
-        {/* Real-time World Coordinate Indicator (CAD Status Bar Overlay) */}
+        {/* 即時狀態列浮動指示器 (CAD Status Bar Overlay) */}
         <div className="absolute bottom-3 right-3 bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg px-3 py-1.5 text-xs shadow-lg flex items-center gap-3 font-mono">
           <div className="flex items-center gap-1 text-slate-400">
             <Crosshair className="w-3.5 h-3.5 text-sky-400" />
@@ -865,8 +1108,8 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           </div>
         </div>
 
-        {/* Selected Entity Float Inspector */}
-        {selectedEntity && (
+        {/* 選取實體浮動檢查面板 (Selected Entity Float Inspector) */}
+        {selectedEntity && !isDrawing && (
           <div className="absolute bottom-3 left-3 bg-slate-900/90 backdrop-blur border border-slate-700 rounded-lg p-3 text-xs shadow-xl max-w-xs animate-in fade-in">
             <div className="flex items-center justify-between pb-1.5 border-b border-slate-800">
               <span className="font-semibold text-sky-400 uppercase">
@@ -917,4 +1160,3 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     </div>
   );
 };
-
