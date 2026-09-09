@@ -56,6 +56,8 @@ export interface CustomPlane {
   offset?: number;
   /** Whether this is a default datum plane (XY, XZ, YZ) */
   isDatum?: boolean;
+  /** If created on a 3D feature face, the ID of the parent feature */
+  parentFeatureId?: string;
 }
 
 export type StandardDatumPlane = 'XY_FRONT' | 'XZ_TOP' | 'YZ_RIGHT';
@@ -299,6 +301,8 @@ export type FeatureType =
   | 'extrude'
   | 'cut'
   | 'revolve'
+  | 'sweep'
+  | 'loft'
   | 'fillet'
   | 'chamfer'
   | 'datum_plane';
@@ -422,9 +426,77 @@ export interface CutFeature extends FeatureNode {
 }
 
 /**
+ * Revolve Feature: Adds 3D material by rotating a profile around an axis
+ */
+export interface RevolveFeature extends FeatureNode {
+  type: 'revolve';
+  sketchFeatureId: FeatureId;
+  selectedProfileIds?: string[];
+  /** Axis of revolution defined by a line or explicit vector */
+  axisEntityId?: string; // Reference to a line in the sketch
+  axisVector?: Vector3D;
+  axisOrigin?: Point3D;
+  /** Angle in degrees (default 360) */
+  angle: number;
+  booleanOperation: BooleanOperation;
+}
+
+/**
+ * Sweep Feature: Adds 3D material by sweeping a profile along a path
+ */
+export interface SweepFeature extends FeatureNode {
+  type: 'sweep';
+  /** Profile sketch */
+  profileSketchId: FeatureId;
+  selectedProfileIds?: string[];
+  /** Path sketch */
+  pathSketchId: FeatureId;
+  selectedPathEntityIds?: string[];
+  booleanOperation: BooleanOperation;
+}
+
+/**
+ * Loft Feature: Creates a 3D shape by blending multiple cross-section profiles
+ */
+export interface LoftFeature extends FeatureNode {
+  type: 'loft';
+  /** Ordered list of sketch features acting as cross sections */
+  sectionSketchIds: FeatureId[];
+  /** Selected profiles for each section */
+  sectionProfileIds?: string[][];
+  booleanOperation: BooleanOperation;
+}
+
+/**
+ * 3D Fillet Feature: Rounds edges of a 3D solid
+ */
+export interface FilletFeature extends FeatureNode {
+  type: 'fillet';
+  /** Radius in mm */
+  radius: number;
+  /** Edges selected for filleting (Edge index/ID mapping from OCCT) */
+  edgeIds: string[];
+  /** Faces selected for filleting all their edges */
+  faceIds?: string[];
+}
+
+/**
+ * 3D Chamfer Feature: Bevels edges of a 3D solid
+ */
+export interface ChamferFeature extends FeatureNode {
+  type: 'chamfer';
+  /** Distance of chamfer */
+  distance: number;
+  distance2?: number; // Optional asymmetric distance
+  angle?: number; // Optional angle if defined by distance+angle
+  /** Edges selected for chamfering */
+  edgeIds: string[];
+}
+
+/**
  * Union of all parametric features supported in the model tree
  */
-export type ParametricFeature = SketchFeature | ExtrudeFeature | CutFeature | FeatureNode;
+export type ParametricFeature = SketchFeature | ExtrudeFeature | CutFeature | RevolveFeature | SweepFeature | LoftFeature | FilletFeature | ChamferFeature | FeatureNode;
 
 /**
  * 3D Tessellated Solid Mesh output from the CAD geometry kernel / OCCT engine
@@ -435,13 +507,13 @@ export interface SolidMesh3D {
   featureName: string;
   featureType: 'extrude' | 'cut' | 'revolve' | 'fillet' | 'chamfer';
   /** Flat array of triangle vertex coordinates [x0, y0, z0, x1, y1, z1, ...] */
-  positions: number[];
+  positions: number[] | Float32Array;
   /** Flat array of normal vectors [nx0, ny0, nz0, ...] */
-  normals: number[];
+  normals: number[] | Float32Array;
   /** Triangle indices [i0, i1, i2, ...] */
-  indices: number[];
+  indices: number[] | Uint32Array;
   /** Boundary / sharp feature edges for CAD line display [x0, y0, z0, x1, y1, z1, ...] */
-  edges?: number[];
+  edges?: number[] | Float32Array;
   /** Bounding box in 3D world space */
   boundingBox: {
     min: Point3D;

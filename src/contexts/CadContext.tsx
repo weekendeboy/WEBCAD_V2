@@ -12,11 +12,14 @@ import {
   CADViewMode,
   ParametricFeature,
   SketchFeature,
+  ExtrudeFeature,
+  CutFeature,
   SketchProfile,
   Constraint,
-  Dimension
+  Dimension,
+  CustomPlane
 } from '../types/cad.ts';
-import { sampleCADDocument } from '../core/sampleCadModel.ts';
+import { sampleCADDocument, datumFrontPlane, datumTopPlane } from '../core/sampleCadModel.ts';
 import {
   solveConstraints,
   analyzeSketchState
@@ -66,18 +69,70 @@ export interface CadState {
   rollbackToFeature: (featureId: string | null) => void;
   rollbackToIndex: (index: number) => void;
   setSketchProfiles: (sketchId: string, profiles: SketchProfile[]) => void;
+  createSketchOnFace: (plane: CustomPlane, name?: string) => string;
+  createExtrudeFeature: (sketchId: string) => string;
+  createCutFeature: (sketchId: string) => string;
+  createRevolveFeature: (sketchId: string) => string;
+  createSweepFeature: (profileSketchId: string, pathSketchId: string) => string;
+  createLoftFeature: (sectionSketchIds: string[]) => string;
+  createFilletFeature: (radius: number, edgeIds: string[]) => string;
+  createChamferFeature: (distance: number, edgeIds: string[]) => string;
+  addPlane: (plane: CustomPlane) => void;
   undo: () => void;
   redo: () => void;
   resetDocument: (newDoc?: CADDocument) => void;
 }
+// 建立一個乾淨的空白文件狀態
+const blankDocument: CADDocument = {
+  id: 'doc_new_01',
+  title: 'Untitled_Part.cad',
+  version: '1.0.0',
+  units: 'mm',
+  layers: {
+    layer_outline: {
+      id: 'layer_outline',
+      name: '0 - Visible Geometry',
+      color: '#38bdf8', // 預設亮藍色
+      visible: true,
+      locked: false,
+      lineType: 'continuous',
+      lineWidth: 0.5
+    }
+  },
+  planes: {
+    [datumFrontPlane.id]: datumFrontPlane,
+    [datumTopPlane.id]: datumTopPlane,
+  },
+  // 建立一個預設的空白草圖供使用者立刻開始畫圖
+  featureTree: [
+    {
+      id: 'feat_sketch_1',
+      name: 'Sketch1 (Base)',
+      type: 'sketch',
+      dependencies: [],
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      planeId: datumFrontPlane.id,
+      plane: datumFrontPlane,
+      entities: [],
+      constraints: [],
+      dimensions: [],
+      profiles: [],
+      solverState: 'under_constrained'
+    } as SketchFeature
+  ],
+  activeFeatureId: 'feat_sketch_1',
+  activeSketchId: 'feat_sketch_1'
+};
 
 export const useCadStore = create<CadState>((set, get) => ({
   document: sampleCADDocument,
-  viewMode: '2D',
+  viewMode: '3D',
   currentTool: 'SELECT',
-  activeFeatureId: sampleCADDocument.activeFeatureId || 'feat_sketch_1',
+  activeFeatureId: 'feat_sketch_1',
   editingFeatureId: null,
-  activeSketchId: sampleCADDocument.activeSketchId || 'feat_sketch_1',
+  activeSketchId: 'feat_sketch_1',
   selectedEntityIds: [],
   history: [],
   future: [],
@@ -373,7 +428,8 @@ export const useCadStore = create<CadState>((set, get) => ({
    * 依特徵索引位置放置退回棒 (index: -1 ~ featureTree.length - 1)
    */
   rollbackToIndex: (index: number) => {
-    const { document, history } = get();
+    const state = get();
+    const { document, history } = state;
     const previousSnapshot = cloneDoc(document);
     const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
 
@@ -384,11 +440,26 @@ export const useCadStore = create<CadState>((set, get) => ({
       } as ParametricFeature;
     });
 
+    // Determine new active feature (the one just above the rollback bar, or null if rolled to top)
+    const newActiveFeatureId = index >= 0 && index < updatedFeatureTree.length
+      ? updatedFeatureTree[index].id
+      : null;
+
+    let newEditingFeatureId = state.editingFeatureId;
+    if (newEditingFeatureId) {
+       const editingIdx = document.featureTree.findIndex(f => f.id === newEditingFeatureId);
+       if (editingIdx > index) {
+         newEditingFeatureId = null; // Close property manager if editing feature is rolled back
+       }
+    }
+
     set({
       document: {
         ...document,
         featureTree: updatedFeatureTree
       },
+      activeFeatureId: newActiveFeatureId,
+      editingFeatureId: newEditingFeatureId,
       history: newHistory,
       future: []
     });
@@ -468,6 +539,305 @@ export const useCadStore = create<CadState>((set, get) => ({
     });
   },
 
+  createSketchOnFace: (plane: CustomPlane, name?: string) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const sketchId = `feat_sketch_face_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const sketchName = name || `Sketch (${plane.name})`;
+
+    const newSketch: SketchFeature = {
+      id: sketchId,
+      name: sketchName,
+      type: 'sketch',
+      dependencies: plane.parentFeatureId ? [plane.parentFeatureId] : [],
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      planeId: plane.id,
+      plane: plane,
+      entities: [],
+      constraints: [],
+      dimensions: [],
+      profiles: [],
+      solverState: 'under_constrained'
+    };
+
+    set({
+      document: {
+        ...document,
+        planes: {
+          ...document.planes,
+          [plane.id]: plane
+        },
+        featureTree: [...document.featureTree, newSketch]
+      },
+      activeSketchId: sketchId,
+      activeFeatureId: sketchId,
+      history: newHistory,
+      future: []
+    });
+
+    return sketchId;
+  },
+
+  createExtrudeFeature: (sketchId: string) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const featId = `feat_extrude_${Date.now()}`;
+    const newExtrude: ExtrudeFeature = {
+      id: featId,
+      name: `Boss-Extrude ${document.featureTree.length}`,
+      type: 'extrude',
+      dependencies: [sketchId],
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      sketchFeatureId: sketchId,
+      depth: 10.0,
+      endCondition: 'blind',
+      booleanOperation: 'new_body'
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newExtrude]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  createCutFeature: (sketchId: string) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const extrudeId = document.featureTree.find(f => f.type === 'extrude')?.id;
+    const dependencies = [sketchId];
+    if (extrudeId) dependencies.push(extrudeId);
+
+    const featId = `feat_cut_${Date.now()}`;
+    const newCut: CutFeature = {
+      id: featId,
+      name: `Cut-Extrude ${document.featureTree.length}`,
+      type: 'cut',
+      dependencies,
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      sketchFeatureId: sketchId,
+      depth: 10.0,
+      endCondition: 'through_all',
+      flipSideToCut: false
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newCut]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  createRevolveFeature: (sketchId: string) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const featId = `feat_revolve_${Date.now()}`;
+    const newRevolve: ParametricFeature = {
+      id: featId,
+      name: `Revolve ${document.featureTree.length}`,
+      type: 'revolve',
+      dependencies: [sketchId],
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      sketchFeatureId: sketchId,
+      angle: 360,
+      booleanOperation: 'new_body'
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newRevolve]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  createSweepFeature: (profileSketchId: string, pathSketchId: string) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const featId = `feat_sweep_${Date.now()}`;
+    const newSweep: ParametricFeature = {
+      id: featId,
+      name: `Sweep ${document.featureTree.length}`,
+      type: 'sweep',
+      dependencies: [profileSketchId, pathSketchId],
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      profileSketchId,
+      pathSketchId,
+      booleanOperation: 'new_body'
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newSweep]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  createLoftFeature: (sectionSketchIds: string[]) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const featId = `feat_loft_${Date.now()}`;
+    const newLoft: ParametricFeature = {
+      id: featId,
+      name: `Loft ${document.featureTree.length}`,
+      type: 'loft',
+      dependencies: [...sectionSketchIds],
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      sectionSketchIds,
+      booleanOperation: 'new_body'
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newLoft]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  createFilletFeature: (radius: number, edgeIds: string[]) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const featId = `feat_fillet_${Date.now()}`;
+    // Depends on the last solid feature
+    const lastSolid = [...document.featureTree].reverse().find(f => ['extrude', 'cut', 'revolve', 'sweep', 'loft', 'fillet', 'chamfer'].includes(f.type));
+    const dependencies = lastSolid ? [lastSolid.id] : [];
+
+    const newFillet: ParametricFeature = {
+      id: featId,
+      name: `Fillet ${document.featureTree.length}`,
+      type: 'fillet',
+      dependencies,
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      radius,
+      edgeIds
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newFillet]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  createChamferFeature: (distance: number, edgeIds: string[]) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const featId = `feat_chamfer_${Date.now()}`;
+    // Depends on the last solid feature
+    const lastSolid = [...document.featureTree].reverse().find(f => ['extrude', 'cut', 'revolve', 'sweep', 'loft', 'fillet', 'chamfer'].includes(f.type));
+    const dependencies = lastSolid ? [lastSolid.id] : [];
+
+    const newChamfer: ParametricFeature = {
+      id: featId,
+      name: `Chamfer ${document.featureTree.length}`,
+      type: 'chamfer',
+      dependencies,
+      suppressed: false,
+      status: 'clean',
+      createdAt: Date.now(),
+      distance,
+      edgeIds
+    };
+
+    set({
+      document: {
+        ...document,
+        featureTree: [...document.featureTree, newChamfer]
+      },
+      activeFeatureId: featId,
+      editingFeatureId: featId,
+      history: newHistory,
+      future: []
+    });
+
+    return featId;
+  },
+
+  addPlane: (plane: CustomPlane) => {
+    const { document } = get();
+    if (document.planes[plane.id]) return;
+    set({
+      document: {
+        ...document,
+        planes: {
+          ...document.planes,
+          [plane.id]: plane
+        }
+      }
+    });
+  },
+
   resetDocument: (newDoc?: CADDocument) => {
     set({
       document: newDoc ? cloneDoc(newDoc) : cloneDoc(sampleCADDocument),
@@ -534,6 +904,15 @@ export const useCadActions = () => {
     toggleSuppressFeature: useCadStore.getState().toggleSuppressFeature,
     rollbackToFeature: useCadStore.getState().rollbackToFeature,
     rollbackToIndex: useCadStore.getState().rollbackToIndex,
+    createSketchOnFace: useCadStore.getState().createSketchOnFace,
+    createExtrudeFeature: useCadStore.getState().createExtrudeFeature,
+    createCutFeature: useCadStore.getState().createCutFeature,
+    createRevolveFeature: useCadStore.getState().createRevolveFeature,
+    createSweepFeature: useCadStore.getState().createSweepFeature,
+    createLoftFeature: useCadStore.getState().createLoftFeature,
+    createFilletFeature: useCadStore.getState().createFilletFeature,
+    createChamferFeature: useCadStore.getState().createChamferFeature,
+    addPlane: useCadStore.getState().addPlane,
     undo: useCadStore.getState().undo,
     redo: useCadStore.getState().redo,
     resetDocument: useCadStore.getState().resetDocument

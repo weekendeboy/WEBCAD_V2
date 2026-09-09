@@ -215,13 +215,20 @@ export const OcctBridge = {
    * @returns SolidMesh3D 網格資料，或在無法計算時回傳 null
    */
   computeFeature(
-    feature: ExtrudeFeature | CutFeature,
+    feature: ParametricFeature,
     context: FeatureRebuildContext
   ): SolidMesh3D | null {
+    if (feature.type !== 'extrude' && feature.type !== 'cut') {
+      console.warn(`[OcctBridge] Fallback JS engine does not support feature type "${feature.type}". Please use WebWorker with WASM enabled.`);
+      return null;
+    }
+
+    const extrudeOrCutFeat = feature as ExtrudeFeature | CutFeature;
+
     // 1. Locate referenced sketch feature
-    const sketch = context.sketchMap.get(feature.sketchFeatureId);
+    const sketch = context.sketchMap.get(extrudeOrCutFeat.sketchFeatureId);
     if (!sketch) {
-      console.warn(`[OcctBridge] Sketch feature "${feature.sketchFeatureId}" not found for feature "${feature.name}"`);
+      console.warn(`[OcctBridge] Sketch feature "${extrudeOrCutFeat.sketchFeatureId}" not found for feature "${feature.name}"`);
       return null;
     }
 
@@ -232,15 +239,17 @@ export const OcctBridge = {
     }
 
     // 2. Extract 2D profile points
-    const targetProfileId = feature.selectedProfileIds?.[0];
+    const targetProfileId = extrudeOrCutFeat.selectedProfileIds?.[0];
     const profile2D = extractProfilePoints(sketch, targetProfileId);
     if (profile2D.length < 3) {
       console.warn(`[OcctBridge] Insufficient 2D profile points for feature "${feature.name}"`);
       return null;
     }
 
-    const depth = Math.max(0.1, feature.depth || 10);
-    const rawDir: Vector3D = (feature as ExtrudeFeature).directionVector || plane.normal;
+    const depth = Math.max(0.1, extrudeOrCutFeat.depth || 10);
+    const rawDir: Vector3D = (feature.type === 'extrude') 
+      ? ((feature as ExtrudeFeature).directionVector || plane.normal)
+      : plane.normal;
     const extrudeDir = normalizeVector(rawDir, { x: 0, y: 0, z: 1 });
 
     // 3. Generate 3D Vertices for Bottom (Base) and Top Caps

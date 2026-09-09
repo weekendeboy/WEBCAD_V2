@@ -68,21 +68,19 @@ const lineRight: LineEntity = {
   state: 'fully_constrained',
   isConstruction: false,
   start: { x: 100, y: 0 },
-  end: { x: 100, y: 60 }
+  end: { x: 100, y: 50 }
 };
 
-const arcTopRight: ArcEntity = {
-  id: 'ent_arc_corner',
-  type: 'arc',
+// 45° Inclined Chamfer Line -> forms arbitrary slanted face in 3D
+const lineChamfer: LineEntity = {
+  id: 'ent_line_chamfer',
+  type: 'line',
   layer: 'layer_outline',
   color: '#2563eb',
   state: 'fully_constrained',
   isConstruction: false,
-  center: { x: 80, y: 60 },
-  radius: 20,
-  startAngle: 0,
-  endAngle: Math.PI / 2,
-  counterClockwise: true
+  start: { x: 100, y: 50 },
+  end: { x: 70, y: 80 }
 };
 
 const lineTop: LineEntity = {
@@ -92,7 +90,7 @@ const lineTop: LineEntity = {
   color: '#2563eb',
   state: 'fully_constrained',
   isConstruction: false,
-  start: { x: 80, y: 80 },
+  start: { x: 70, y: 80 },
   end: { x: 0, y: 80 }
 };
 
@@ -206,7 +204,7 @@ export const sketchFeature1: SketchFeature = {
   createdAt: 1715000000000,
   planeId: datumFrontPlane.id,
   plane: datumFrontPlane,
-  entities: [lineBottom, lineRight, arcTopRight, lineTop, lineLeft, polylineRib],
+  entities: [lineBottom, lineRight, lineChamfer, lineTop, lineLeft, polylineRib],
   constraints: constraintsSketch1,
   dimensions: dimensionsSketch1,
   profiles: [
@@ -215,11 +213,11 @@ export const sketchFeature1: SketchFeature = {
       contourEntityIds: [
         'ent_line_bottom',
         'ent_line_right',
-        'ent_arc_corner',
+        'ent_line_chamfer',
         'ent_line_top',
         'ent_line_left'
       ],
-      area: 7656.64
+      area: 7550.00
     }
   ],
   solverState: 'fully_constrained'

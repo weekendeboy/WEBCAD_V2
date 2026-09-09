@@ -1,6 +1,6 @@
 {
-  "name": "Wasm Web Worker React App",
-  "description": "CAD 2D drafting and 3D parametric feature architecture with TypeScript types, constraints, and DAG feature tree.",
+  "name": "Parametric CAD",
+  "description": "CAD 3D parametric feature modeling with OpenCASCADE.js (WASM) kernel offloaded to WebWorker, ensuring stable 60 FPS during interactive 3D orbit and CSG boolean cut operations.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

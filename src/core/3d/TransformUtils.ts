@@ -503,3 +503,6 @@ export function transformPointWithMatrix(
     return { x: x * invW, y: y * invW, z: z * invW };
   }
 }
+
+// Re-export SolidWorks-style Sketch-on-Face Core Mathematics Library
+export * from '../math/SketchOnFaceMath.ts';

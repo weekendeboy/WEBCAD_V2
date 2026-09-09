@@ -11,6 +11,22 @@ import {
 } from '../../types/cad.ts';
 
 /**
+ * WebAssembly 版本的開源約束引擎核心 (如 SolveSpace 的邏輯) 介面設計。
+ * 用於聯立求解非線性方程組 (Non-linear Equation Systems)。
+ */
+export interface WasmSolverAdapter {
+  isLoaded: boolean;
+  solve: (entities: CADEntity2D[], constraints: Constraint[]) => SolveEntitiesResult;
+}
+
+export const WasmConstraintEngine: WasmSolverAdapter = {
+  isLoaded: false,
+  solve: () => {
+    throw new Error('WebAssembly Solver is not currently loaded. Fallback to iterative solver.');
+  }
+};
+
+/**
  * 求解器支援之定義狀態
  */
 export type DefinedState = 'UnderDefined' | 'FullyDefined' | 'OverDefined';
@@ -605,6 +621,208 @@ export function solveConstraints(
           }
         }
       }
+
+      // -------------------------------------------------------------
+      // (G) 共線約束 (Collinear Constraint)
+      // -------------------------------------------------------------
+      else if (type === 'collinear' && ids.length >= 2) {
+        const entA = entityMap.get(ids[0]);
+        const entB = entityMap.get(ids[1]);
+        if (entA && entB && entA.type === 'line' && entB.type === 'line') {
+          const p1 = entA.start;
+          const p2 = entA.end;
+          
+          let dx = p2.x - p1.x;
+          let dy = p2.y - p1.y;
+          const len = Math.hypot(dx, dy);
+          if (len > 1e-7) {
+            dx /= len;
+            dy /= len;
+            
+            for (const pt of [entB.start, entB.end]) {
+              const fix = isFixed(pt, entB.id);
+              if (!fix) {
+                const vx = pt.x - p1.x;
+                const vy = pt.y - p1.y;
+                const t = vx * dx + vy * dy;
+                const px = p1.x + t * dx;
+                const py = p1.y + t * dy;
+                
+                const disp = Math.hypot(pt.x - px, pt.y - py);
+                pt.x = px;
+                pt.y = py;
+                if (disp > iterMaxDisp) iterMaxDisp = disp;
+              }
+            }
+          }
+        }
+      }
+
+      // -------------------------------------------------------------
+      // (H) 對稱約束 (Symmetric Constraint)
+      // -------------------------------------------------------------
+      else if (type === 'symmetric' && ids.length >= 3) {
+        const entA = entityMap.get(ids[0]);
+        const entB = entityMap.get(ids[1]);
+        const axisEnt = entityMap.get(ids[2]); // The symmetry axis
+        if (entA && entB && axisEnt && axisEnt.type === 'line') {
+           const ptA = getEntityPoint(entA, (constraint as any).pointIndexA ?? 0);
+           const ptB = getEntityPoint(entB, (constraint as any).pointIndexB ?? 0);
+           
+           if (ptA && ptB) {
+             const ax1 = axisEnt.start;
+             const ax2 = axisEnt.end;
+             let dx = ax2.x - ax1.x;
+             let dy = ax2.y - ax1.y;
+             const len = Math.hypot(dx, dy);
+             if (len > 1e-7) {
+               dx /= len;
+               dy /= len;
+               
+               const fixA = isFixed(ptA, entA.id);
+               const fixB = isFixed(ptB, entB.id);
+               
+               if (!fixA || !fixB) {
+                 const vxA = ptA.x - ax1.x;
+                 const vyA = ptA.y - ax1.y;
+                 const tA = vxA * dx + vyA * dy;
+                 const pxA = ax1.x + tA * dx;
+                 const pyA = ax1.y + tA * dy;
+                 
+                 const expectedBx = pxA - (ptA.x - pxA);
+                 const expectedBy = pyA - (ptA.y - pyA);
+                 
+                 if (fixA && !fixB) {
+                   const disp = Math.hypot(ptB.x - expectedBx, ptB.y - expectedBy);
+                   ptB.x = expectedBx;
+                   ptB.y = expectedBy;
+                   if (disp > iterMaxDisp) iterMaxDisp = disp;
+                 } else if (!fixA && fixB) {
+                   const vxB = ptB.x - ax1.x;
+                   const vyB = ptB.y - ax1.y;
+                   const tB = vxB * dx + vyB * dy;
+                   const pxB = ax1.x + tB * dx;
+                   const pyB = ax1.y + tB * dy;
+                   
+                   const expectedAx = pxB - (ptB.x - pxB);
+                   const expectedAy = pyB - (ptB.y - pyB);
+                   const disp = Math.hypot(ptA.x - expectedAx, ptA.y - expectedAy);
+                   ptA.x = expectedAx;
+                   ptA.y = expectedAy;
+                   if (disp > iterMaxDisp) iterMaxDisp = disp;
+                 } else {
+                   const vxB = ptB.x - ax1.x;
+                   const vyB = ptB.y - ax1.y;
+                   const tB = vxB * dx + vyB * dy;
+                   const pxB = ax1.x + tB * dx;
+                   const pyB = ax1.y + tB * dy;
+                   
+                   const expectedAx = pxB - (ptB.x - pxB);
+                   const expectedAy = pyB - (ptB.y - pyB);
+                   
+                   const disp1 = Math.hypot(ptA.x - expectedAx, ptA.y - expectedAy) / 2;
+                   const disp2 = Math.hypot(ptB.x - expectedBx, ptB.y - expectedBy) / 2;
+                   
+                   ptA.x += (expectedAx - ptA.x) / 2;
+                   ptA.y += (expectedAy - ptA.y) / 2;
+                   ptB.x += (expectedBx - ptB.x) / 2;
+                   ptB.y += (expectedBy - ptB.y) / 2;
+                   
+                   const disp = Math.max(disp1, disp2);
+                   if (disp > iterMaxDisp) iterMaxDisp = disp;
+                 }
+               }
+             }
+           }
+        }
+      }
+
+      // -------------------------------------------------------------
+      // (I) 相切約束 (Tangent Constraint)
+      // -------------------------------------------------------------
+      else if (type === 'tangent' && ids.length >= 2) {
+        const entA = entityMap.get(ids[0]);
+        const entB = entityMap.get(ids[1]);
+        if (entA && entB) {
+          // Line & Circle
+          let lineEnt: LineEntity | null = null;
+          let circleEnt: CircleEntity | ArcEntity | null = null;
+          if (entA.type === 'line' && (entB.type === 'circle' || entB.type === 'arc')) {
+            lineEnt = entA as LineEntity;
+            circleEnt = entB as CircleEntity | ArcEntity;
+          } else if (entB.type === 'line' && (entA.type === 'circle' || entA.type === 'arc')) {
+            lineEnt = entB as LineEntity;
+            circleEnt = entA as CircleEntity | ArcEntity;
+          }
+          
+          if (lineEnt && circleEnt) {
+             const p1 = lineEnt.start;
+             const p2 = lineEnt.end;
+             const c = circleEnt.center;
+             const r = circleEnt.radius;
+             
+             let dx = p2.x - p1.x;
+             let dy = p2.y - p1.y;
+             const len = Math.hypot(dx, dy);
+             if (len > 1e-7) {
+               dx /= len;
+               dy /= len;
+               const nx = -dy;
+               const ny = dx;
+               
+               const vx = c.x - p1.x;
+               const vy = c.y - p1.y;
+               const dist = vx * nx + vy * ny;
+               
+               const error = Math.abs(dist) - r;
+               const fixC = isFixed(c, circleEnt.id);
+               
+               if (!fixC && Math.abs(error) > 1e-5) {
+                 const sign = dist >= 0 ? 1 : -1;
+                 c.x -= nx * sign * error;
+                 c.y -= ny * sign * error;
+                 if (Math.abs(error) > iterMaxDisp) iterMaxDisp = Math.abs(error);
+               }
+             }
+          }
+          // Circle & Circle
+          else if ((entA.type === 'circle' || entA.type === 'arc') && (entB.type === 'circle' || entB.type === 'arc')) {
+            const c1 = entA.center;
+            const c2 = entB.center;
+            const r1 = entA.radius;
+            const r2 = (entB as CircleEntity | ArcEntity).radius;
+            
+            const targetDist = r1 + r2; 
+            let dx = c2.x - c1.x;
+            let dy = c2.y - c1.y;
+            let curLen = Math.hypot(dx, dy);
+            
+            if (curLen < 1e-7) { dx = 1; dy = 0; curLen = 1; }
+            const ux = dx / curLen;
+            const uy = dy / curLen;
+            const delta = curLen - targetDist;
+            
+            const fix1 = isFixed(c1, entA.id);
+            const fix2 = isFixed(c2, entB.id);
+            
+            if (!fix1 && fix2) {
+              c1.x += ux * delta;
+              c1.y += uy * delta;
+              if (Math.abs(delta) > iterMaxDisp) iterMaxDisp = Math.abs(delta);
+            } else if (fix1 && !fix2) {
+              c2.x -= ux * delta;
+              c2.y -= uy * delta;
+              if (Math.abs(delta) > iterMaxDisp) iterMaxDisp = Math.abs(delta);
+            } else if (!fix1 && !fix2) {
+              c1.x += ux * (delta / 2);
+              c1.y += uy * (delta / 2);
+              c2.x -= ux * (delta / 2);
+              c2.y -= uy * (delta / 2);
+              if (Math.abs(delta) > iterMaxDisp) iterMaxDisp = Math.abs(delta);
+            }
+          }
+        }
+      }
     }
 
     // 紀錄最大推移量
@@ -669,10 +887,13 @@ export function getConstraintDofReduction(type: ConstraintType): number {
     case 'parallel':
     case 'perpendicular':
     case 'tangent':
-    case 'collinear':
       return 1;
+    case 'collinear':
+      return 2; // 共線消除角度與平移
     case 'concentric':
       return 2; // (cx1 = cx2, cy1 = cy2)
+    case 'symmetric':
+      return 2; // 對稱通常消除兩個座標自由度
     case 'equal_length':
     case 'equal_radius':
       return 1;

@@ -40,12 +40,7 @@ export const CADToolbar: React.FC = () => {
   const { canUndo, canRedo, undoCount, redoCount } = useHistoryStatus();
 
   // Stable actions from the store
-  const setTool = useCadStore((s) => s.setTool);
-  const setViewMode = useCadStore((s) => s.setViewMode);
-  const undo = useCadStore((s) => s.undo);
-  const redo = useCadStore((s) => s.redo);
-  const addEntity = useCadStore((s) => s.addEntity);
-  const updateFeature = useCadStore((s) => s.updateFeature);
+  const { setTool, setViewMode, undo, redo, addEntity, updateFeature, createExtrudeFeature, createCutFeature } = useCadStore.getState();
 
   // Keyboard shortcut listener: Ctrl+Z / Cmd+Z for undo, Ctrl+Y / Cmd+Shift+Z for redo
   useEffect(() => {
@@ -192,6 +187,40 @@ export const CADToolbar: React.FC = () => {
           >
             <Plus className="w-3.5 h-3.5" />
             <span>+ Circle</span>
+          </button>
+        </div>
+
+        {/* Feature Creation Buttons */}
+        <div className="flex items-center gap-1">
+          <button
+            id="create-extrude-btn"
+            onClick={() => {
+              if (activeSketchId) {
+                createExtrudeFeature(activeSketchId);
+                setViewMode('3D');
+              }
+            }}
+            disabled={!activeSketchId}
+            title="Create Extrude from Active Sketch"
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 hover:bg-emerald-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Box className="w-3.5 h-3.5" />
+            <span>Extrude</span>
+          </button>
+          <button
+            id="create-cut-btn"
+            onClick={() => {
+              if (activeSketchId) {
+                createCutFeature(activeSketchId);
+                setViewMode('3D');
+              }
+            }}
+            disabled={!activeSketchId}
+            title="Create Cut from Active Sketch"
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-rose-950/80 text-rose-300 border border-rose-800 hover:bg-rose-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Slash className="w-3.5 h-3.5" />
+            <span>Cut</span>
           </button>
         </div>
 

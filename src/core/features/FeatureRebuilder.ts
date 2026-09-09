@@ -28,6 +28,11 @@ import {
 } from '../../types/cad.ts';
 import { OcctBridge, FeatureRebuildContext } from './OcctBridge.ts';
 import { useCadStore } from '../../contexts/CadContext.tsx';
+import {
+  OcctWorkerClient,
+  WorkerStatusInfo,
+  WorkerKernelMetrics
+} from '../../workers/index.ts';
 
 // ============================================================================
 // 1. Topological Sorting for Parametric DAG (Directed Acyclic Graph)
@@ -202,11 +207,11 @@ export function rebuildModel(
     if (feature.type === 'sketch') {
       // Store sketch for subsequent 3D extrusion/cut features
       context.sketchMap.set(feature.id, feature as SketchFeature);
-    } else if (feature.type === 'extrude' || feature.type === 'cut') {
+    } else if (feature.type !== 'datum_plane') {
       // Encountered 3D Solid Feature: Call OcctBridge to compute 3D mesh
       try {
         const mesh = OcctBridge.computeFeature(
-          feature as ExtrudeFeature | CutFeature,
+          feature,
           context
         );
 
@@ -233,23 +238,45 @@ export interface UseModelRebuilderResult {
   isRebuilding: boolean;
   activeFeatureCount: number;
   lastRebuiltAt: number;
+  workerStatus: WorkerStatusInfo;
+  workerMetrics: WorkerKernelMetrics;
 }
 
 /**
  * 響應式 React Hook：當 Zustand store 中的 featureTree 更新時，
- * 自動進行防抖 (Debounced) 重建並回傳最新的 3D 網格陣列。
+ * 自動透過 OcctWorkerClient (WebWorker) 非同步計算 3D 實體模型與布林運算。
  *
- * @param debounceMs 防抖毫秒數（預設 25ms，兼顧高頻參數拖曳與渲染流暢度）
+ * 核心優勢：
+ * - 耗時之 OpenCASCADE WASM (BRepPrimAPI_MakePrism / BRepAlgoAPI_Cut / Tessellation)
+ *   完全移至獨立 WebWorker 執行緒。
+ * - UI 主執行緒在使用者進行 3D 視角旋轉、拖曳時維持極限流暢的 60 FPS！
+ *
+ * @param debounceMs 防抖毫秒數（預設 20ms，兼顧高頻參數拖曳與渲染流暢度）
  */
-export function useModelRebuilder(debounceMs = 25): UseModelRebuilderResult {
+export function useModelRebuilder(debounceMs = 20): UseModelRebuilderResult {
   const featureTree = useCadStore((state) => state.document.featureTree);
 
   const [meshes, setMeshes] = useState<SolidMesh3D[]>(() => rebuildModel(featureTree));
   const [isRebuilding, setIsRebuilding] = useState<boolean>(false);
   const [lastRebuiltAt, setLastRebuiltAt] = useState<number>(() => Date.now());
 
+  const client = useMemo(() => OcctWorkerClient.getInstance(), []);
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatusInfo>(() => client.getStatus());
+  const [workerMetrics, setWorkerMetrics] = useState<WorkerKernelMetrics>(() => client.getMetrics());
+
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Subscribe to worker status & metrics
+  useEffect(() => {
+    const unsubStatus = client.subscribeStatus(setWorkerStatus);
+    const unsubMetrics = client.subscribeMetrics(setWorkerMetrics);
+    return () => {
+      unsubStatus();
+      unsubMetrics();
+    };
+  }, [client]);
+
+  // Trigger asynchronous model rebuild inside WebWorker upon featureTree change
   useEffect(() => {
     setIsRebuilding(true);
 
@@ -257,11 +284,22 @@ export function useModelRebuilder(debounceMs = 25): UseModelRebuilderResult {
       clearTimeout(timerRef.current);
     }
 
-    timerRef.current = setTimeout(() => {
-      const newMeshes = rebuildModel(featureTree);
-      setMeshes(newMeshes);
-      setIsRebuilding(false);
-      setLastRebuiltAt(Date.now());
+    timerRef.current = setTimeout(async () => {
+      try {
+        const newMeshes = await client.rebuildModelAsync(featureTree);
+        if (newMeshes && newMeshes.length > 0) {
+          setMeshes(newMeshes);
+        } else {
+          // If worker returned empty, fall back to synchronous calculation
+          setMeshes(rebuildModel(featureTree));
+        }
+      } catch (err) {
+        console.warn('[useModelRebuilder] Worker rebuild error, applying fallback:', err);
+        setMeshes(rebuildModel(featureTree));
+      } finally {
+        setIsRebuilding(false);
+        setLastRebuiltAt(Date.now());
+      }
     }, debounceMs);
 
     return () => {
@@ -269,7 +307,7 @@ export function useModelRebuilder(debounceMs = 25): UseModelRebuilderResult {
         clearTimeout(timerRef.current);
       }
     };
-  }, [featureTree, debounceMs]);
+  }, [featureTree, debounceMs, client]);
 
   const activeFeatureCount = useMemo(
     () => featureTree.filter((f) => !f.suppressed).length,
@@ -280,6 +318,8 @@ export function useModelRebuilder(debounceMs = 25): UseModelRebuilderResult {
     meshes,
     isRebuilding,
     activeFeatureCount,
-    lastRebuiltAt
+    lastRebuiltAt,
+    workerStatus,
+    workerMetrics
   };
 }
