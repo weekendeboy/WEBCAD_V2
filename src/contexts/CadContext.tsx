@@ -127,9 +127,9 @@ const blankDocument: CADDocument = {
 };
 
 export const useCadStore = create<CadState>((set, get) => ({
-  document: sampleCADDocument,
-  viewMode: '3D',
-  currentTool: 'SELECT',
+  document: blankDocument,     // <--- 替換成乾淨的空白文件
+  viewMode: '2D',              // <--- 一開始直接進入 2D 草圖繪製模式
+  currentTool: 'LINE',         // <--- 預設拿起畫線工具
   activeFeatureId: 'feat_sketch_1',
   editingFeatureId: null,
   activeSketchId: 'feat_sketch_1',
