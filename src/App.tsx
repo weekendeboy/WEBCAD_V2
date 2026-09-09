@@ -12,11 +12,13 @@ import {
   useActiveFeatureId,
   useActiveSketch
 } from './contexts/index.ts';
+import { useAutoSketchProfilesSync } from './core/2d/TopologyEngine.ts';
 import {
   CADSketchCanvas,
   CADToolbar,
   CAD3DViewport,
   FeatureTreeViewer,
+  FeaturePropertyManager,
   PlaneInspector,
   TypeReferenceViewer
 } from './components/index.ts';
@@ -32,6 +34,9 @@ import {
 } from 'lucide-react';
 
 export default function App() {
+  // 自動監聽並防抖計算草圖封閉面 profiles，同步至 Zustand store 與 3D 特徵樹
+  useAutoSketchProfilesSync();
+
   // Fine-grained Zustand atomic selectors (only updates when specific slice changes)
   const docTitle = useCadStore((s) => s.document.title);
   const docUnits = useCadStore((s) => s.document.units);
@@ -178,6 +183,9 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {/* Right Column: Feature PropertyManager Panel (展开参数修改) */}
+        <FeaturePropertyManager />
       </div>
 
       {/* Footer / Status Bar */}

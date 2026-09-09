@@ -426,6 +426,34 @@ export interface CutFeature extends FeatureNode {
  */
 export type ParametricFeature = SketchFeature | ExtrudeFeature | CutFeature | FeatureNode;
 
+/**
+ * 3D Tessellated Solid Mesh output from the CAD geometry kernel / OCCT engine
+ */
+export interface SolidMesh3D {
+  id: string;
+  featureId: FeatureId;
+  featureName: string;
+  featureType: 'extrude' | 'cut' | 'revolve' | 'fillet' | 'chamfer';
+  /** Flat array of triangle vertex coordinates [x0, y0, z0, x1, y1, z1, ...] */
+  positions: number[];
+  /** Flat array of normal vectors [nx0, ny0, nz0, ...] */
+  normals: number[];
+  /** Triangle indices [i0, i1, i2, ...] */
+  indices: number[];
+  /** Boundary / sharp feature edges for CAD line display [x0, y0, z0, x1, y1, z1, ...] */
+  edges?: number[];
+  /** Bounding box in 3D world space */
+  boundingBox: {
+    min: Point3D;
+    max: Point3D;
+  };
+  color?: string;
+  opacity?: number;
+  isCut?: boolean;
+  triangleCount: number;
+  vertexCount: number;
+}
+
 // ============================================================================
 // 6. Complete CAD Document Model
 // ============================================================================

@@ -1,17 +1,24 @@
 /**
  * @license
- * 2D Sketch Topology Engine (AutoCAD 2D + SolidWorks 3D Parametric)
+ * 2D Sketch Topology Engine (AutoCAD 2D Drafting + SolidWorks 3D Parametric Features)
  *
- * Provides:
+ * 拓撲分析模組 (Topology Analysis Module):
  * 1. buildGraph(entities, tolerance):
- *    Extracts Nodes & Edges from lines and arcs, merging coincident vertices within tolerance (default 1e-5).
+ *    - 將所有線段 (LineEntity) 與圓弧 (ArcEntity) 提取出頂點 (Nodes) 與邊 (Edges)。
+ *    - 合併容差內 (預設 tolerance 1e-5) 的重合點。
+ *    - 計算精確之出射切線角度並依逆時針 (CCW) 排序出射半邊。
  * 2. findFaces(graph):
- *    Traverses planar half-edges using the Left-most Turn (Minimum Interior Angle) algorithm to discover
- *    all closed profiles (faces) and calculates their polygon area via the Shoelace formula.
- * 3. computeSketchProfiles(entities):
- *    Convenience pipeline connecting buildGraph -> findFaces with hole/island detection.
- * 4. useSketchTopology(sketchId, debounceMs):
- *    Debounced React Hook that watches entities in Zustand store and updates sketch.profiles automatically.
+ *    - 依據 DCEL 雙向鏈結邊表，使用最左轉角法 (Left-most Turn / 最小內角演算法) 尋找所有封閉面 (Closed Profiles)。
+ *    - 採用鞋帶公式 (Shoelace formula) 計算各封閉多邊形之代數面積 (Area)。
+ *    - 正面積即為逆時針方向圍成的封閉實體面；負面積為無邊界之外表面 (Exterior face)；零或微小面積為懸空天線線段。
+ *    - 支援獨立圓形圖元以及內孔/島嶼 (Islands/Voids) 嵌套檢測。
+ * 3. computeSketchProfiles(entities, tolerance):
+ *    - 串聯 buildGraph -> findFaces 的高階拓撲分析工具管線。
+ * 4. 防抖 (Debounced) 更新機制:
+ *    - useSketchTopology(sketchId, debounceMs): React Hook，防抖監聽 Zustand 中的 entities 更新並同步計算 profiles。
+ *    - useAutoSketchProfilesSync(debounceMs): 全域 React Hook，自動保持 featureTree 中所有草圖特徵的 profiles 處於最新狀態。
+ *    - debouncedComputeAndStoreProfiles(sketchId, entities, debounceMs, tolerance, onComplete): 支援取消的防抖工具函式。
+ *    - updateSketchProfilesInStore(sketchId, entities, tolerance): 即時同步寫入 Zustand store。
  */
 
 import { useState, useEffect, useRef } from 'react';
@@ -28,13 +35,25 @@ import {
 import { useCadStore } from '../../contexts/index.ts';
 
 // ============================================================================
-// Types & Graph Representation
+// 1. Types & Topology Graph Data Structures
 // ============================================================================
 
 export interface TopologyNode {
   id: string;
   point: Point2D;
+  /** List of outgoing half-edge IDs sorted in counter-clockwise order */
   outgoingEdgeIds: string[];
+}
+
+export interface TopologyEdge {
+  id: string;
+  nodeA: string;
+  nodeB: string;
+  entityId: string;
+  entityType: 'line' | 'arc' | 'polyline_seg';
+  length: number;
+  halfEdgeFwdId: string;
+  halfEdgeRevId: string;
 }
 
 export interface TopologyHalfEdge {
@@ -47,7 +66,7 @@ export interface TopologyHalfEdge {
   isReversed: boolean;
   /** Normalized outgoing polar angle in radians [0, 2π) */
   angle: number;
-  /** Discretized points along this directed half-edge (from fromNode to toNode) */
+  /** Discretized coordinates from fromNode to toNode along the geometry */
   points: Point2D[];
   twinId: string;
   visited?: boolean;
@@ -55,18 +74,19 @@ export interface TopologyHalfEdge {
 
 export interface TopologyGraph {
   nodes: Map<string, TopologyNode>;
+  edges: TopologyEdge[];
   halfEdges: Map<string, TopologyHalfEdge>;
   tolerance: number;
-  /** Isolated circles that directly constitute closed profiles */
+  /** Standalone circles that constitute full closed profiles */
   isolatedCircles: CircleEntity[];
 }
 
 // ============================================================================
-// Helper Utilities
+// 2. Geometric Math Utilities
 // ============================================================================
 
 /**
- * Normalizes an angle in radians to the range [0, 2π).
+ * Normalizes an angle in radians to the canonical interval [0, 2π).
  */
 export function normalizeAngle(rad: number): number {
   const twoPi = 2 * Math.PI;
@@ -74,8 +94,8 @@ export function normalizeAngle(rad: number): number {
 }
 
 /**
- * Finds an existing node within distance tolerance (default 1e-5),
- * or registers a new node in the graph.
+ * Finds an existing vertex within Euclidean distance tolerance (default 1e-5),
+ * or creates and registers a new vertex node in the graph.
  */
 export function findOrCreateNode(
   pt: Point2D,
@@ -99,45 +119,82 @@ export function findOrCreateNode(
 }
 
 /**
- * Samples discretized points along an arc curve in proper traversal direction.
+ * Discretizes points along an arc curve with analytical departure tangents.
  */
-function sampleArcPoints(arc: ArcEntity): {
+export function sampleArcPoints(arc: ArcEntity): {
   startPt: Point2D;
   endPt: Point2D;
   forwardPoints: Point2D[];
+  startTangent: number;
+  endTangent: number;
+  sweep: number;
 } {
   const isCCW = arc.counterClockwise !== false;
   let startA = arc.startAngle;
   let endA = arc.endAngle;
 
+  let sweep: number;
   if (isCCW) {
     while (endA <= startA) endA += 2 * Math.PI;
+    sweep = endA - startA;
   } else {
     while (endA >= startA) endA -= 2 * Math.PI;
+    sweep = startA - endA;
   }
 
-  const sweep = Math.abs(endA - startA);
-  const numSegments = Math.max(8, Math.min(48, Math.ceil((sweep / Math.PI) * 16)));
+  const startPt: Point2D = {
+    x: arc.center.x + arc.radius * Math.cos(arc.startAngle),
+    y: arc.center.y + arc.radius * Math.sin(arc.startAngle)
+  };
+
+  const endPt: Point2D = {
+    x: arc.center.x + arc.radius * Math.cos(arc.endAngle),
+    y: arc.center.y + arc.radius * Math.sin(arc.endAngle)
+  };
+
+  // Adaptive subdivision based on arc sweep angle
+  const numSegments = Math.max(8, Math.min(64, Math.ceil((sweep / Math.PI) * 16)));
   const pts: Point2D[] = [];
 
   for (let i = 0; i <= numSegments; i++) {
+    if (i === 0) {
+      pts.push({ ...startPt });
+      continue;
+    }
+    if (i === numSegments) {
+      pts.push({ ...endPt });
+      continue;
+    }
     const t = i / numSegments;
-    const ang = startA + t * (endA - startA);
+    const ang = isCCW ? startA + t * sweep : startA - t * sweep;
     pts.push({
       x: arc.center.x + arc.radius * Math.cos(ang),
       y: arc.center.y + arc.radius * Math.sin(ang)
     });
   }
 
+  // Analytical departure tangent angle leaving startPt along forward direction:
+  const startTangent = normalizeAngle(
+    isCCW ? arc.startAngle + Math.PI / 2 : arc.startAngle - Math.PI / 2
+  );
+
+  // Analytical departure tangent angle leaving endPt along reverse direction (towards startPt):
+  const endTangent = normalizeAngle(
+    isCCW ? arc.endAngle - Math.PI / 2 : arc.endAngle + Math.PI / 2
+  );
+
   return {
-    startPt: pts[0],
-    endPt: pts[pts.length - 1],
-    forwardPoints: pts
+    startPt,
+    endPt,
+    forwardPoints: pts,
+    startTangent,
+    endTangent,
+    sweep
   };
 }
 
 /**
- * Ray-casting algorithm: tests if a test point is strictly inside a closed 2D polygon.
+ * Ray-casting algorithm: determines whether a test point is strictly inside a 2D polygon.
  */
 export function isPointInPolygon(pt: Point2D, polygon: Point2D[]): boolean {
   let inside = false;
@@ -160,14 +217,14 @@ export function isPointInPolygon(pt: Point2D, polygon: Point2D[]): boolean {
 }
 
 // ============================================================================
-// 1. buildGraph
+// 3. buildGraph (Extraction of Nodes & Edges, Tolerance Merging)
 // ============================================================================
 
 /**
- * Builds a planar topology graph from 2D CAD entities:
- * - Filters out construction lines (reference geometry only).
- * - Extracts vertices and edges from lines, arcs, and polyline segments.
- * - Merges coincident vertices within tolerance (default 1e-5).
+ * Builds a planar topology graph from 2D CAD sketch entities:
+ * - Filters out construction lines (reference geometry only, per CAD standards).
+ * - Extracts vertices (Nodes) and undirected/directed edges from lines, arcs, and polyline segments.
+ * - Merges coincident points within tolerance (default 1e-5).
  * - Generates pairs of directed half-edges with outward tangent angles.
  * - Sorts all outgoing half-edges at each node in counter-clockwise order.
  */
@@ -176,6 +233,7 @@ export function buildGraph(
   tolerance: number = 1e-5
 ): TopologyGraph {
   const nodes = new Map<string, TopologyNode>();
+  const edges: TopologyEdge[] = [];
   const halfEdges = new Map<string, TopologyHalfEdge>();
   const isolatedCircles: CircleEntity[] = [];
 
@@ -186,33 +244,40 @@ export function buildGraph(
     entityType: 'line' | 'arc' | 'polyline_seg',
     startPt: Point2D,
     endPt: Point2D,
-    forwardPts: Point2D[]
+    forwardPts: Point2D[],
+    explicitFwdAngle?: number,
+    explicitRevAngle?: number
   ) => {
-    // Check for degenerate edge (length <= tolerance)
     const rawLen = Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
-    if (rawLen <= tolerance) return;
 
+    // Merge coincident endpoints within tolerance
     const u = findOrCreateNode(startPt, nodes, tolerance);
     const v = findOrCreateNode(endPt, nodes, tolerance);
 
-    if (u === v) return; // Ignore self-loop degenerate edges
+    // Skip degenerate edge if endpoints collapse into the same node
+    if (u === v) return;
 
     const edgeId = `edge_${edgeCounter++}`;
     const fwdId = `${edgeId}_fwd`;
     const revId = `${edgeId}_rev`;
 
-    // Calculate forward outgoing angle at u (direction from point 0 to point 1)
-    const fwdAngle = normalizeAngle(
-      Math.atan2(forwardPts[1].y - forwardPts[0].y, forwardPts[1].x - forwardPts[0].x)
-    );
+    // Forward outgoing tangent angle leaving u towards v
+    const fwdAngle =
+      explicitFwdAngle !== undefined
+        ? explicitFwdAngle
+        : normalizeAngle(
+            Math.atan2(forwardPts[1].y - forwardPts[0].y, forwardPts[1].x - forwardPts[0].x)
+          );
 
-    // Reversed points
     const reversedPts = [...forwardPts].reverse();
 
-    // Calculate reverse outgoing angle at v (direction from point 0 to point 1 in reverse)
-    const revAngle = normalizeAngle(
-      Math.atan2(reversedPts[1].y - reversedPts[0].y, reversedPts[1].x - reversedPts[0].x)
-    );
+    // Reverse outgoing tangent angle leaving v towards u
+    const revAngle =
+      explicitRevAngle !== undefined
+        ? explicitRevAngle
+        : normalizeAngle(
+            Math.atan2(reversedPts[1].y - reversedPts[0].y, reversedPts[1].x - reversedPts[0].x)
+          );
 
     const fwdHalfEdge: TopologyHalfEdge = {
       id: fwdId,
@@ -247,31 +312,70 @@ export function buildGraph(
 
     nodes.get(u)!.outgoingEdgeIds.push(fwdId);
     nodes.get(v)!.outgoingEdgeIds.push(revId);
+
+    edges.push({
+      id: edgeId,
+      nodeA: u,
+      nodeB: v,
+      entityId,
+      entityType,
+      length: rawLen,
+      halfEdgeFwdId: fwdId,
+      halfEdgeRevId: revId
+    });
   };
 
   for (const entity of entities) {
-    // In SolidWorks and industrial CAD, construction geometry does not participate in solid feature boundaries
+    // In SolidWorks and AutoCAD, construction geometry does not participate in solid feature boundaries
     if (entity.isConstruction) continue;
 
     if (entity.type === 'line') {
       const line = entity as LineEntity;
+      const fwdAngle = normalizeAngle(
+        Math.atan2(line.end.y - line.start.y, line.end.x - line.start.x)
+      );
+      const revAngle = normalizeAngle(
+        Math.atan2(line.start.y - line.end.y, line.start.x - line.end.x)
+      );
+
       registerEdge(
         line.id,
         'line',
         line.start,
         line.end,
-        [line.start, line.end]
+        [line.start, line.end],
+        fwdAngle,
+        revAngle
       );
     } else if (entity.type === 'arc') {
       const arc = entity as ArcEntity;
       const sampled = sampleArcPoints(arc);
-      registerEdge(
-        arc.id,
-        'arc',
-        sampled.startPt,
-        sampled.endPt,
-        sampled.forwardPoints
-      );
+
+      // Check if arc forms a full 360-degree circle
+      if (
+        Math.hypot(sampled.endPt.x - sampled.startPt.x, sampled.endPt.y - sampled.startPt.y) <= tolerance &&
+        sampled.sweep >= 2 * Math.PI - 1e-4
+      ) {
+        isolatedCircles.push({
+          id: arc.id,
+          type: 'circle',
+          layer: arc.layer,
+          state: arc.state,
+          isConstruction: false,
+          center: arc.center,
+          radius: arc.radius
+        });
+      } else {
+        registerEdge(
+          arc.id,
+          'arc',
+          sampled.startPt,
+          sampled.endPt,
+          sampled.forwardPoints,
+          sampled.startTangent,
+          sampled.endTangent
+        );
+      }
     } else if (entity.type === 'circle') {
       isolatedCircles.push(entity as CircleEntity);
     } else if (entity.type === 'polyline') {
@@ -299,6 +403,7 @@ export function buildGraph(
 
   return {
     nodes,
+    edges,
     halfEdges,
     tolerance,
     isolatedCircles
@@ -306,14 +411,15 @@ export function buildGraph(
 }
 
 // ============================================================================
-// 2. findFaces (Left-Most Turn & Shoelace Area)
+// 4. findFaces (Left-Most Turn & Shoelace Area Algorithm)
 // ============================================================================
 
 /**
- * Finds all closed faces (bounded profiles) in the planar topology graph:
- * - Uses the DCEL Left-most Turn (Minimum Angular Deviation) algorithm:
- *   When traversing from u -> v, the twin is v -> u.
- *   Rotating clockwise around node v starting from the twin gives the first edge to your left.
+ * Finds all closed profiles (faces) in the planar topology graph:
+ * - Uses the DCEL Left-most Turn (Minimum Interior Angle) algorithm:
+ *   When traversing from u -> v along half-edge e, twin(e) leaves v towards u.
+ *   Rotating clockwise around node v starting from twin(e) gives the first outgoing edge on your left.
+ *   In the CCW-sorted outgoing list, this is precisely `(twinIdx - 1 + N) % N`.
  * - Computes polygon signed area using the Shoelace formula.
  * - Positive signed area identifies bounded interior profiles; negative signed area (outer unbounded face) is discarded.
  * - Integrates standalone full circles.
@@ -467,7 +573,7 @@ export function findFaces(graph: TopologyGraph): SketchProfile[] {
 }
 
 // ============================================================================
-// 3. Convenience Pipeline
+// 5. Convenience Pipeline & Direct Store Sync
 // ============================================================================
 
 /**
@@ -481,8 +587,53 @@ export function computeSketchProfiles(
   return findFaces(graph);
 }
 
+/**
+ * Calculates sketch profiles from entities and directly commits them to the Zustand store.
+ */
+export function updateSketchProfilesInStore(
+  sketchId: string,
+  entities: CADEntity2D[],
+  tolerance: number = 1e-5
+): SketchProfile[] {
+  const profiles = computeSketchProfiles(entities, tolerance);
+  const state = useCadStore.getState();
+  state.setSketchProfiles(sketchId, profiles);
+  return profiles;
+}
+
+/**
+ * Debounced utility function: computes sketch profiles and commits them to Zustand store.
+ * Returns a cancel function.
+ */
+let globalDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function debouncedComputeAndStoreProfiles(
+  sketchId: string,
+  entities: CADEntity2D[],
+  debounceMs: number = 150,
+  tolerance: number = 1e-5,
+  onComplete?: (profiles: SketchProfile[]) => void
+): () => void {
+  if (globalDebounceTimer) {
+    clearTimeout(globalDebounceTimer);
+  }
+
+  globalDebounceTimer = setTimeout(() => {
+    const profiles = updateSketchProfilesInStore(sketchId, entities, tolerance);
+    onComplete?.(profiles);
+    globalDebounceTimer = null;
+  }, debounceMs);
+
+  return () => {
+    if (globalDebounceTimer) {
+      clearTimeout(globalDebounceTimer);
+      globalDebounceTimer = null;
+    }
+  };
+}
+
 // ============================================================================
-// 4. Debounced React Hook (useSketchTopology)
+// 6. Debounced React Hooks (useSketchTopology & useAutoSketchProfilesSync)
 // ============================================================================
 
 /**
@@ -513,8 +664,8 @@ export function useSketchTopology(
       if (prevProfilesRef.current.length > 0) {
         prevProfilesRef.current = [];
         setProfiles([]);
-        if (setSketchProfiles) {
-          setSketchProfiles(sketchId || '', []);
+        if (setSketchProfiles && sketchId) {
+          setSketchProfiles(sketchId, []);
         }
       }
       return;
@@ -551,4 +702,29 @@ export function useSketchTopology(
   }, [sketchId, entities, debounceMs, setSketchProfiles]);
 
   return profiles;
+}
+
+/**
+ * Global React Hook: Automatically keeps profiles synchronized for all sketch features in the
+ * active CAD document. Ideal for invocation at root App level to ensure 3D features and the DAG
+ * tree always reflect updated 2D closed contours even if 2D canvas is unmounted.
+ */
+export function useAutoSketchProfilesSync(debounceMs: number = 150): void {
+  const featureTree = useCadStore((s) => s.document.featureTree);
+  const setSketchProfiles = useCadStore((s) => s.setSketchProfiles);
+
+  useEffect(() => {
+    const sketchFeatures = featureTree.filter(
+      (f) => f.type === 'sketch'
+    ) as SketchFeature[];
+
+    const timer = setTimeout(() => {
+      for (const sketch of sketchFeatures) {
+        const calculated = computeSketchProfiles(sketch.entities);
+        setSketchProfiles(sketch.id, calculated);
+      }
+    }, debounceMs);
+
+    return () => clearTimeout(timer);
+  }, [featureTree, debounceMs, setSketchProfiles]);
 }

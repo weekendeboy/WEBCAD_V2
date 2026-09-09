@@ -38,6 +38,8 @@ export interface CadState {
   currentTool: CADTool;
   // Currently highlighted or selected feature node in the DAG
   activeFeatureId: string | null;
+  // Feature currently opened for editing in the right property manager panel
+  editingFeatureId: string | null;
   // Currently active sketch ID for 2D entity additions
   activeSketchId: string | null;
   // Currently selected 2D entity IDs
@@ -51,6 +53,7 @@ export interface CadState {
   setTool: (tool: CADTool) => void;
   setViewMode: (mode: CADViewMode) => void;
   setActiveFeatureId: (featureId: string | null) => void;
+  setEditingFeatureId: (featureId: string | null) => void;
   setActiveSketchId: (sketchId: string | null) => void;
   setSelectedEntityIds: (ids: string[]) => void;
   addEntity: (sketchId: string, entity: CADEntity2D) => void;
@@ -60,6 +63,8 @@ export interface CadState {
   addDimension: (sketchId: string, dimension: Dimension) => void;
   updateFeature: (featureId: string, partial: Partial<ParametricFeature>) => void;
   toggleSuppressFeature: (featureId: string) => void;
+  rollbackToFeature: (featureId: string | null) => void;
+  rollbackToIndex: (index: number) => void;
   setSketchProfiles: (sketchId: string, profiles: SketchProfile[]) => void;
   undo: () => void;
   redo: () => void;
@@ -71,6 +76,7 @@ export const useCadStore = create<CadState>((set, get) => ({
   viewMode: '2D',
   currentTool: 'SELECT',
   activeFeatureId: sampleCADDocument.activeFeatureId || 'feat_sketch_1',
+  editingFeatureId: null,
   activeSketchId: sampleCADDocument.activeSketchId || 'feat_sketch_1',
   selectedEntityIds: [],
   history: [],
@@ -322,14 +328,100 @@ export const useCadStore = create<CadState>((set, get) => ({
     });
   },
 
+  setEditingFeatureId: (featureId: string | null) => {
+    set({ editingFeatureId: featureId });
+  },
+
+  /**
+   * SolidWorks 風格退回棒 (Rollback Bar)
+   * 將退回棒移動到某個特徵 (featureId) 上方/後方。
+   * 該特徵之後的所有特徵狀態皆設為 suppressed = true；
+   * 該特徵及之前的特徵狀態皆設為 suppressed = false。
+   * 若 featureId 為 null，代表退回至最頂部（所有特徵皆被抑制）。
+   */
+  rollbackToFeature: (featureId: string | null) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const targetIndex = featureId === null
+      ? -1
+      : document.featureTree.findIndex((f) => f.id === featureId);
+
+    const updatedFeatureTree = document.featureTree.map((feature, idx) => {
+      if (targetIndex === -1) {
+        // Rolled back to before all features
+        return { ...feature, suppressed: true } as ParametricFeature;
+      }
+      return {
+        ...feature,
+        suppressed: idx > targetIndex
+      } as ParametricFeature;
+    });
+
+    set({
+      document: {
+        ...document,
+        featureTree: updatedFeatureTree
+      },
+      history: newHistory,
+      future: []
+    });
+  },
+
+  /**
+   * 依特徵索引位置放置退回棒 (index: -1 ~ featureTree.length - 1)
+   */
+  rollbackToIndex: (index: number) => {
+    const { document, history } = get();
+    const previousSnapshot = cloneDoc(document);
+    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+
+    const updatedFeatureTree = document.featureTree.map((feature, idx) => {
+      return {
+        ...feature,
+        suppressed: idx > index
+      } as ParametricFeature;
+    });
+
+    set({
+      document: {
+        ...document,
+        featureTree: updatedFeatureTree
+      },
+      history: newHistory,
+      future: []
+    });
+  },
+
   setSketchProfiles: (sketchId: string, profiles: SketchProfile[]) => {
     const { document } = get();
-    let changed = false;
+    const targetSketch = document.featureTree.find(
+      (f) => f.id === sketchId && f.type === 'sketch'
+    ) as SketchFeature | undefined;
+
+    if (!targetSketch) return;
+
+    // Check if profiles are already structurally identical
+    const existing = targetSketch.profiles || [];
+    const isSame =
+      existing.length === profiles.length &&
+      existing.every((ep, i) => {
+        const np = profiles[i];
+        return (
+          ep.id === np.id &&
+          ep.area === np.area &&
+          ep.isIsland === np.isIsland &&
+          ep.contourEntityIds.length === np.contourEntityIds.length &&
+          ep.contourEntityIds.every((id, j) => id === np.contourEntityIds[j])
+        );
+      });
+
+    if (isSame) return;
 
     const updatedFeatureTree = document.featureTree.map((feature) => {
       if (feature.id === sketchId && feature.type === 'sketch') {
         const sketch = feature as SketchFeature;
-        changed = true;
         return {
           ...sketch,
           profiles
@@ -338,14 +430,12 @@ export const useCadStore = create<CadState>((set, get) => ({
       return feature;
     });
 
-    if (changed) {
-      set({
-        document: {
-          ...document,
-          featureTree: updatedFeatureTree
-        }
-      });
-    }
+    set({
+      document: {
+        ...document,
+        featureTree: updatedFeatureTree
+      }
+    });
   },
 
   undo: () => {
@@ -396,6 +486,7 @@ export const useCADDocument = () => useCadStore((s) => s.document);
 export const useViewMode = () => useCadStore((s) => s.viewMode);
 export const useCurrentTool = () => useCadStore((s) => s.currentTool);
 export const useActiveFeatureId = () => useCadStore((s) => s.activeFeatureId);
+export const useEditingFeatureId = () => useCadStore((s) => s.editingFeatureId);
 export const useActiveSketchId = () => useCadStore((s) => s.activeSketchId);
 export const useSelectedEntityIds = () => useCadStore((s) => s.selectedEntityIds);
 export const useFeatureTree = () => useCadStore((s) => s.document.featureTree);
@@ -431,6 +522,7 @@ export const useCadActions = () => {
     setTool: useCadStore.getState().setTool,
     setViewMode: useCadStore.getState().setViewMode,
     setActiveFeatureId: useCadStore.getState().setActiveFeatureId,
+    setEditingFeatureId: useCadStore.getState().setEditingFeatureId,
     setActiveSketchId: useCadStore.getState().setActiveSketchId,
     setSelectedEntityIds: useCadStore.getState().setSelectedEntityIds,
     addEntity: useCadStore.getState().addEntity,
@@ -440,6 +532,8 @@ export const useCadActions = () => {
     addDimension: useCadStore.getState().addDimension,
     updateFeature: useCadStore.getState().updateFeature,
     toggleSuppressFeature: useCadStore.getState().toggleSuppressFeature,
+    rollbackToFeature: useCadStore.getState().rollbackToFeature,
+    rollbackToIndex: useCadStore.getState().rollbackToIndex,
     undo: useCadStore.getState().undo,
     redo: useCadStore.getState().redo,
     resetDocument: useCadStore.getState().resetDocument

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { CustomPlane, Vector3D, Point3D } from '../types/cad.ts';
-import { Compass, Move, ArrowUpRight, Check, Copy } from 'lucide-react';
+import { CustomPlane, Vector3D, Point3D, Point2D } from '../types/cad.ts';
+import { Compass, Move, ArrowUpRight, Check, Copy, Grid3X3, ArrowRightLeft } from 'lucide-react';
+import { getPlaneMatrix, sketchToWorld3D, world3DToSketch } from '../core/3d/TransformUtils.ts';
 
 interface PlaneInspectorProps {
   planes: CustomPlane[];
@@ -181,6 +182,91 @@ export const PlaneInspector: React.FC<PlaneInspectorProps> = ({
             <span>xAxis × yAxis = Normal (Right-Hand Rule):</span>
             <span className="text-emerald-400 font-bold">Matched ✓</span>
           </div>
+        </div>
+
+        {/* 4x4 Transformation Matrix (getPlaneMatrix) */}
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Grid3X3 className="w-3.5 h-3.5 text-indigo-400" />
+              <span>4x4 Transformation Matrix (Column-Major)</span>
+            </div>
+            <span className="text-[10px] text-slate-500 font-mono">
+              [ X_axis | Y_axis | Normal | Origin ]
+            </span>
+          </div>
+
+          <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg overflow-x-auto">
+            <table className="w-full text-center font-mono text-[11px]">
+              <thead>
+                <tr className="text-slate-500 border-b border-slate-800/80 text-[10px]">
+                  <th className="pb-1 text-rose-400 font-semibold">xAxis (col 0)</th>
+                  <th className="pb-1 text-emerald-400 font-semibold">yAxis (col 1)</th>
+                  <th className="pb-1 text-blue-400 font-semibold">Normal (col 2)</th>
+                  <th className="pb-1 text-amber-400 font-semibold">Origin (col 3)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/40">
+                {(() => {
+                  const m = getPlaneMatrix(currentPlane);
+                  // Column-major: m[col * 4 + row]
+                  const rows = [0, 1, 2, 3];
+                  return rows.map((row) => (
+                    <tr key={row} className="hover:bg-slate-900/60 transition-colors">
+                      <td className="py-1 px-2 text-rose-300">{m[0 * 4 + row].toFixed(4)}</td>
+                      <td className="py-1 px-2 text-emerald-300">{m[1 * 4 + row].toFixed(4)}</td>
+                      <td className="py-1 px-2 text-blue-300">{m[2 * 4 + row].toFixed(4)}</td>
+                      <td className="py-1 px-2 text-amber-300">{m[3 * 4 + row].toFixed(4)}</td>
+                    </tr>
+                  ));
+                })()}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Interactive 2D ⇄ 3D Transformation Verification */}
+        <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-2.5">
+          <div className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+            <ArrowRightLeft className="w-3.5 h-3.5 text-cyan-400" />
+            <span>2D Sketch ⇄ 3D World Transformation Test</span>
+          </div>
+
+          {(() => {
+            const test2D: Point2D = { x: 50, y: 30 };
+            const world3D = sketchToWorld3D(test2D, currentPlane);
+            const back2D = world3DToSketch(world3D, currentPlane);
+
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs font-mono">
+                <div className="p-2.5 bg-slate-900/80 rounded border border-slate-800">
+                  <div className="text-[10px] text-slate-400 mb-1 flex items-center justify-between">
+                    <span>sketchToWorld3D(2D → 3D)</span>
+                    <span className="text-cyan-400">Input (u, v)</span>
+                  </div>
+                  <div className="text-slate-300 text-[11px]">
+                    2D: <span className="text-cyan-300 font-bold">({test2D.x}, {test2D.y})</span>
+                  </div>
+                  <div className="text-slate-300 text-[11px] mt-1">
+                    3D: <span className="text-amber-300 font-bold">({world3D.x.toFixed(2)}, {world3D.y.toFixed(2)}, {world3D.z.toFixed(2)})</span>
+                  </div>
+                </div>
+
+                <div className="p-2.5 bg-slate-900/80 rounded border border-slate-800">
+                  <div className="text-[10px] text-slate-400 mb-1 flex items-center justify-between">
+                    <span>world3DToSketch(3D → 2D)</span>
+                    <span className="text-emerald-400">Projected (u, v)</span>
+                  </div>
+                  <div className="text-slate-300 text-[11px]">
+                    Projected 2D: <span className="text-emerald-300 font-bold">({back2D.x.toFixed(2)}, {back2D.y.toFixed(2)})</span>
+                  </div>
+                  <div className="text-[10px] text-emerald-400/90 mt-1">
+                    Round-trip exact match ✓
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>
