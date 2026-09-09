@@ -115,7 +115,8 @@ export const FeaturePropertyManager: React.FC = () => {
               </div>
               <input
                 type="range" min="5" max="120" step="5" value={extrudeFeat.depth}
-                onChange={(e) => updateFeature(extrudeFeat.id, { depth: Number(e.target.value) } as any)}
+                onChange={(e) => updateFeature(extrudeFeat.id, { depth: Number(e.target.value) } as any, false)}
+                onInput={(e) => updateFeature(extrudeFeat.id, { depth: Number((e.target as HTMLInputElement).value) } as any, true)}
                 className="w-full accent-emerald-500 cursor-pointer h-1.5 bg-slate-800 rounded"
               />
             </div>
@@ -135,7 +136,8 @@ export const FeaturePropertyManager: React.FC = () => {
               </div>
               <input
                 type="range" min="5" max="60" step="5" value={cutFeat.depth}
-                onChange={(e) => updateFeature(cutFeat.id, { depth: Number(e.target.value) } as any)}
+                onChange={(e) => updateFeature(cutFeat.id, { depth: Number(e.target.value) } as any, false)}
+                onInput={(e) => updateFeature(cutFeat.id, { depth: Number((e.target as HTMLInputElement).value) } as any, true)}
                 className="w-full accent-rose-500 cursor-pointer h-1.5 bg-slate-800 rounded"
               />
             </div>

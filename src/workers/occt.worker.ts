@@ -805,8 +805,15 @@ async function processModelRebuild(
               );
               const cutPlane = cutSketch.plane;
               const cutDepth = Math.max(0.1, cutFeat.depth || 30);
+              
+              // Direction is typically opposite to the sketch normal to penetrate the solid
+              const cutterDir = normalizeVector({
+                x: cutFeat.flipSideToCut ? cutPlane.normal.x : -cutPlane.normal.x,
+                y: cutFeat.flipSideToCut ? cutPlane.normal.y : -cutPlane.normal.y,
+                z: cutFeat.flipSideToCut ? cutPlane.normal.z : -cutPlane.normal.z
+              });
 
-              const cutterDir = normalizeVector(cutPlane.normal);
+              // Offset backward along the cutter direction to avoid coincident coplanar faces on the surface
               const cutterStartOffset: Point3D = {
                 x: -cutterDir.x * 2,
                 y: -cutterDir.y * 2,
@@ -971,8 +978,8 @@ async function processModelRebuild(
       // -------------------------------------------------------------
       for (const feat of featureTree) {
         if (feat.suppressed) continue;
-        if (feat.type === 'extrude' || feat.type === 'cut') {
-          const solidFeat = feat as ExtrudeFeature | CutFeature;
+        if (feat.type === 'extrude') {
+          const solidFeat = feat as ExtrudeFeature;
           const sketch = sketchMap.get(solidFeat.sketchFeatureId);
           if (!sketch) continue;
 
@@ -980,15 +987,15 @@ async function processModelRebuild(
             sketch,
             solidFeat.selectedProfileIds?.[0]
           );
-          const isCut = solidFeat.type === 'cut';
+          
           const depth = Math.max(0.1, solidFeat.depth || 30);
 
           const tess = computeFallbackExtrudeMesh(
             profile,
             sketch.plane,
             depth,
-            (solidFeat as ExtrudeFeature).directionVector || sketch.plane.normal,
-            isCut
+            solidFeat.directionVector || sketch.plane.normal,
+            false
           );
 
           const mesh: WorkerMeshTransferable = {
@@ -1001,9 +1008,9 @@ async function processModelRebuild(
             indices: tess.indices,
             edges: tess.edges,
             boundingBox: { min: tess.min, max: tess.max },
-            color: isCut ? '#f43f5e' : '#38bdf8',
-            opacity: isCut ? 0.65 : 1.0,
-            isCut,
+            color: '#38bdf8',
+            opacity: 1.0,
+            isCut: false,
             triangleCount: tess.indices.length / 3,
             vertexCount: tess.positions.length / 3
           };

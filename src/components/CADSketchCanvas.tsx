@@ -8,8 +8,12 @@ import {
   ArcEntity,
   PolylineEntity,
   Point2D,
-  LengthConstraint
+  LengthConstraint,
+  SketchFeature,
+  Point3D
 } from '../types/cad.ts';
+import { useModelRebuilder } from '../core/features/FeatureRebuilder.ts';
+import { distanceToSketchPlane, worldToSketch } from '../core/math/SketchOnFaceMath.ts';
 import { findSnapPoint, SnapResult } from '../core/2d/SnapManager.ts';
 import { hitTest } from '../core/2d/HitTest.ts';
 import { useSketchTopology } from '../core/2d/TopologyEngine.ts';
@@ -102,6 +106,67 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
   const addDimension = useCadStore((s) => s.addDimension);
   const selectedEntityIds = useCadStore((s) => s.selectedEntityIds);
   const setSelectedEntityIds = useCadStore((s) => s.setSelectedEntityIds);
+
+  const featureTree = useCadStore(s => s.document.featureTree);
+  const sketchFeature = featureTree.find(f => f.id === targetSketchId) as SketchFeature;
+  const { meshes } = useModelRebuilder();
+
+  const referenceEntities = React.useMemo(() => {
+    if (!sketchFeature || !sketchFeature.plane.parentFeatureId) return [];
+    const parentMesh = meshes.find(m => m.featureId === sketchFeature.plane.parentFeatureId);
+    if (!parentMesh) return [];
+    
+    const plane = sketchFeature.plane;
+    const positions = parentMesh.positions;
+    const indices = parentMesh.indices;
+    
+    const edges: LineEntity[] = [];
+    const addedEdges = new Set<string>();
+    
+    for (let i = 0; i < indices.length; i += 3) {
+      const idx0 = indices[i];
+      const idx1 = indices[i+1];
+      const idx2 = indices[i+2];
+      
+      const v0 = { x: positions[idx0*3], y: positions[idx0*3+1], z: positions[idx0*3+2] };
+      const v1 = { x: positions[idx1*3], y: positions[idx1*3+1], z: positions[idx1*3+2] };
+      const v2 = { x: positions[idx2*3], y: positions[idx2*3+1], z: positions[idx2*3+2] };
+      
+      const d0 = Math.abs(distanceToSketchPlane(v0, plane));
+      const d1 = Math.abs(distanceToSketchPlane(v1, plane));
+      const d2 = Math.abs(distanceToSketchPlane(v2, plane));
+      
+      const eps = 1e-3;
+      const processEdge = (va: Point3D, vb: Point3D, idxa: number, idxb: number) => {
+         const key = idxa < idxb ? `${idxa}-${idxb}` : `${idxb}-${idxa}`;
+         if (addedEdges.has(key)) return;
+         
+         const pA = worldToSketch(va, plane);
+         const pB = worldToSketch(vb, plane);
+         if (Math.hypot(pA.x - pB.x, pA.y - pB.y) < 1e-4) return;
+         
+         addedEdges.add(key);
+         edges.push({
+           id: `ref_edge_${key}`,
+           type: 'line',
+           layer: 'layer_outline',
+           color: '#64748b',
+           state: 'fully_constrained',
+           isConstruction: true,
+           start: pA,
+           end: pB
+         } as LineEntity);
+      };
+
+      if (d0 < eps && d1 < eps) processEdge(v0, v1, idx0, idx1);
+      if (d1 < eps && d2 < eps) processEdge(v1, v2, idx1, idx2);
+      if (d2 < eps && d0 < eps) processEdge(v2, v0, idx2, idx0);
+    }
+    
+    return edges;
+  }, [sketchFeature, meshes]);
+
+  const allEntities = React.useMemo(() => [...entities, ...referenceEntities], [entities, referenceEntities]);
 
   const [hoveredEntityId, setHoveredEntityId] = useState<string | null>(null);
   const [showConstraints, setShowConstraints] = useState(true);
@@ -291,7 +356,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     const rawWorldPt = screenToWorld(pt);
 
     // 呼叫物件鎖點 (OSnap) 演算法
-    const snap = findSnapPoint(rawWorldPt, entities, scale, 15);
+    const snap = findSnapPoint(rawWorldPt, allEntities, scale, 15);
     setCurrentSnap(snap);
 
     if (snap) {
@@ -459,7 +524,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
       }
     } else if (currentTool === 'SELECT') {
       const hitThreshold = Math.max(1.5, 8 / scale);
-      const hitId = hitTest(clickPt, entities, hitThreshold);
+      const hitId = hitTest(clickPt, allEntities, hitThreshold);
       const isShift = e.shiftKey;
 
       if (hitId) {
@@ -480,9 +545,9 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
     } else if (currentTool === 'DIMENSION') {
       if (!dimensionTargetLine) {
         const hitThreshold = Math.max(2, 10 / scale);
-        const hitId = hitTest(clickPt, entities, hitThreshold);
+        const hitId = hitTest(clickPt, allEntities, hitThreshold);
         if (hitId) {
-          const hitEnt = entities.find((ent) => ent.id === hitId);
+          const hitEnt = allEntities.find((ent) => ent.id === hitId);
           if (hitEnt && hitEnt.type === 'line') {
             setDimensionTargetLine(hitEnt as LineEntity);
             setSelectedEntityIds([hitEnt.id]);
@@ -763,6 +828,20 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
               })}
           </g>
 
+          {/* 實體參考投影層 */}
+          <g id="cad-reference-projection-layer" pointerEvents="none">
+            {referenceEntities.map((edge) => (
+              <line 
+                key={edge.id}
+                x1={toSvgX(edge.start.x)} y1={toSvgY(edge.start.y)} 
+                x2={toSvgX(edge.end.x)} y2={toSvgY(edge.end.y)} 
+                stroke="#64748b" 
+                strokeWidth="1.5" 
+                strokeDasharray="4,4" 
+              />
+            ))}
+          </g>
+
           {/* 幾何圖元 */}
           {entities.map((entity) => {
             const isSelected = selectedEntityIds.includes(entity.id);
@@ -893,7 +972,7 @@ export const CADSketchCanvas: React.FC<CADSketchCanvasProps> = ({
           {showDimensions && (
             <g id="cad-dimensions-layer" className="select-none font-mono">
               {dimensions.map((dim) => {
-                const targetEnt = entities.find((e) => dim.entityIds.includes(e.id));
+                const targetEnt = allEntities.find((e) => dim.entityIds.includes(e.id));
                 let p1: Point2D | null = null;
                 let p2: Point2D | null = null;
 

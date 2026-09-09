@@ -64,7 +64,7 @@ export interface CadState {
   deleteEntity: (sketchId: string, entityId: string) => void;
   addConstraint: (sketchId: string, constraint: Constraint) => void;
   addDimension: (sketchId: string, dimension: Dimension) => void;
-  updateFeature: (featureId: string, partial: Partial<ParametricFeature>) => void;
+  updateFeature: (featureId: string, partial: Partial<ParametricFeature>, skipHistory?: boolean) => void;
   toggleSuppressFeature: (featureId: string) => void;
   rollbackToFeature: (featureId: string | null) => void;
   rollbackToIndex: (index: number) => void;
@@ -331,13 +331,13 @@ export const useCadStore = create<CadState>((set, get) => ({
     });
   },
 
-  updateFeature: (featureId: string, partial: Partial<ParametricFeature>) => {
+  updateFeature: (featureId: string, partial: Partial<ParametricFeature>, skipHistory: boolean = false) => {
     const { document, history } = get();
 
-    const previousSnapshot = cloneDoc(document);
-    const newHistory = [...history, previousSnapshot].slice(-MAX_HISTORY_LENGTH);
+    const previousSnapshot = skipHistory ? null : cloneDoc(document);
+    const newHistory = skipHistory ? history : [...history, previousSnapshot!].slice(-MAX_HISTORY_LENGTH);
 
-    const updatedFeatureTree = document.featureTree.map((feature) => {
+    const updatedFeatureTree = [...document.featureTree].map((feature) => {
       if (feature.id === featureId) {
         return {
           ...feature,
@@ -353,7 +353,7 @@ export const useCadStore = create<CadState>((set, get) => ({
         featureTree: updatedFeatureTree
       },
       history: newHistory,
-      future: []
+      future: skipHistory ? get().future : []
     });
   },
 
